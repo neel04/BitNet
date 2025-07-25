@@ -1,4 +1,6 @@
+#include <iostream>
 #include <vector>
+#include <arm_neon.h>
 #include <type_traits>
 
 #include "ggml-bitnet.h"
@@ -66,24 +68,24 @@ size_t quantize_i2_s(const float * src, void * dst, int64_t nrow, int64_t n_per_
         q8[i] = (double)src[i] * i2_scale > 0 ? 2 : 0;
     }
 
-    memset(dst, 0, n * sizeof(uint8_t) / 4);
+    memset(dst, 0, n * sizeof(uint8_t) / 4); // init as zeroes
 
     // q8 -> 0, 1, 2
     //       |  |  |
     //      -1, 0, 1
 
     uint8_t* i2_weight = (uint8_t*)dst;
-    for (int i = 0; i < n / QK_I2; i++) {
+    for (int i = 0; i < n / QK_I2; i++) { // i: block index
         for (int j = 0; j < QK_I2; j++) {
-            int group_idx = j / 32;
+            int group_idx = j / 32; // 4x int2 == int8
             int group_pos = j % 32;
             uint8_t temp = (q8[i * QK_I2 + j] << (6 - 2 * group_idx));
-            i2_weight[i * 32 + group_pos] |= temp;            
+            i2_weight[i * 32 + group_pos] |= temp;
         }
     }
 
     float* scale_ptr = (float*)((char*)i2_weight + n / 4);
-    scale_ptr[0] = i2_scale;
+    scale_ptr[0] = i2_scale; // 8 bits of packed weights + 1 bit scalar for scaling
 
     free(q8);
 
@@ -91,6 +93,18 @@ size_t quantize_i2_s(const float * src, void * dst, int64_t nrow, int64_t n_per_
     return nrow * row_size / 4 + 32;
 }
 
+/**
+ * @brief Computes the dot product of `nrc` rows from a 2-bit quantized matrix `vx` and an 8-bit quantized matrix `vy`.
+ *
+ * @param n      The number of elements per vector (the shared inner dimension K).
+ * @param s      Pointer to the destination buffer for the float results.
+ * @param bs     Byte stride for the destination buffer `s`.
+ * @param vx     Pointer to the 2-bit quantized matrix (e.g., weights).
+ * @param bx     Byte stride for the `vx` matrix.
+ * @param vy     Pointer to the 8-bit quantized matrix (e.g., activations).
+ * @param by     Byte stride for the `vy` matrix.
+ * @param nrc    The number of row dot products to compute.
+ */
 void ggml_vec_dot_i2_i8_s(int n, float * s, size_t bs, const void * vx, size_t bx, const void * vy, size_t by, int nrc) {
     const uint8_t *    x = (uint8_t *)vx;
     const int8_t  *    y = (int8_t *)vy;
@@ -186,27 +200,33 @@ void ggml_vec_dot_i2_i8_s(int n, float * s, size_t bs, const void * vx, size_t b
     *s = (float)sumi;
 
 #elif defined(__ARM_NEON)
-
+    // Initialize four 128-bit registers to accumulate results in parallel.
     int32x4_t accu_0 = vdupq_n_s32(0);
     int32x4_t accu_1 = vdupq_n_s32(0);
     int32x4_t accu_2 = vdupq_n_s32(0);
     int32x4_t accu_3 = vdupq_n_s32(0);
-    const uint8x16_t mask = vdupq_n_u8(3);
+    const uint8x16_t mask = vdupq_n_u8(3); // Mask for isolating 2-bit values (0b00000011).
 
+    // Process major blocks of the matrix.
     for (int i=0; i < group32_num; i++) {
 
 #if defined(__ARM_FEATURE_DOTPROD)
 
 #else
+        // Fallback: use 16-bit accumulators for intermediate products.
         int16x8_t accu32_0 = vdupq_n_s16(0);
         int16x8_t accu32_1 = vdupq_n_s16(0);
         int16x8_t accu32_2 = vdupq_n_s16(0);
         int16x8_t accu32_3 = vdupq_n_s16(0);
 #endif
 
+        // Process sub-blocks within a major block.
         for (int j=0; j < 32; j++) {
+            // Load 32 bytes, corresponding to 128 2-bit weights.
             uint8x16_t xq8_6 = vld1q_u8(x + i * 32 * 32 + j * 32);
             uint8x16_t xq8_7 = vld1q_u8(x + i * 32 * 32 + j * 32 + 16);
+
+            // Unpack 2-bit values from the loaded bytes by right-shifting.
             uint8x16_t xq8_4 = vshrq_n_u8(xq8_6, 2);
             uint8x16_t xq8_5 = vshrq_n_u8(xq8_7, 2);
             uint8x16_t xq8_2 = vshrq_n_u8(xq8_6, 4);
@@ -214,6 +234,7 @@ void ggml_vec_dot_i2_i8_s(int n, float * s, size_t bs, const void * vx, size_t b
             uint8x16_t xq8_0 = vshrq_n_u8(xq8_6, 6);
             uint8x16_t xq8_1 = vshrq_n_u8(xq8_7, 6);
 
+            // Isolate the lower 2 bits and reinterpret as signed int8 for dot product.
             int8x16_t q8_0 = vreinterpretq_s8_u8(vandq_u8(xq8_0, mask));
             int8x16_t q8_1 = vreinterpretq_s8_u8(vandq_u8(xq8_1, mask));
             int8x16_t q8_2 = vreinterpretq_s8_u8(vandq_u8(xq8_2, mask));
@@ -223,6 +244,7 @@ void ggml_vec_dot_i2_i8_s(int n, float * s, size_t bs, const void * vx, size_t b
             int8x16_t q8_6 = vreinterpretq_s8_u8(vandq_u8(xq8_6, mask));
             int8x16_t q8_7 = vreinterpretq_s8_u8(vandq_u8(xq8_7, mask));
 
+            // Load 128 8-bit activation values.
             const int8x16_t yq8_0 = vld1q_s8(y + i * 128 * 32 + j * 128 + 0);
             const int8x16_t yq8_1 = vld1q_s8(y + i * 128 * 32 + j * 128 + 16);
             const int8x16_t yq8_2 = vld1q_s8(y + i * 128 * 32 + j * 128 + 32);
@@ -233,6 +255,7 @@ void ggml_vec_dot_i2_i8_s(int n, float * s, size_t bs, const void * vx, size_t b
             const int8x16_t yq8_7 = vld1q_s8(y + i * 128 * 32 + j * 128 + 112);
 
 #if defined(__ARM_FEATURE_DOTPROD)
+            // Perform dot product and accumulate using dedicated hardware instructions.
             accu_0 = vdotq_s32(accu_0, q8_0, yq8_0);
             accu_1 = vdotq_s32(accu_1, q8_1, yq8_1);
             accu_2 = vdotq_s32(accu_2, q8_2, yq8_2);
@@ -242,6 +265,7 @@ void ggml_vec_dot_i2_i8_s(int n, float * s, size_t bs, const void * vx, size_t b
             accu_2 = vdotq_s32(accu_2, q8_6, yq8_6);
             accu_3 = vdotq_s32(accu_3, q8_7, yq8_7);
 #else
+            // Fallback for older ARMv8: multiply and accumulate long, widening to 16-bit.
             accu32_0 = vmlal_s8(accu32_0, vget_low_s8(q8_0), vget_low_s8(yq8_0));
             accu32_1 = vmlal_s8(accu32_1, vget_high_s8(q8_0), vget_high_s8(yq8_0));
             accu32_2 = vmlal_s8(accu32_2, vget_low_s8(q8_1), vget_low_s8(yq8_1));
@@ -264,6 +288,7 @@ void ggml_vec_dot_i2_i8_s(int n, float * s, size_t bs, const void * vx, size_t b
 #if defined(__ARM_FEATURE_DOTPROD)
 
 #else
+        // Accumulate 16-bit intermediate values into 32-bit main accumulators.
         accu_0 = vaddq_s32(accu_0, vmovl_s16(vget_low_s16(accu32_0)));
         accu_0 = vaddq_s32(accu_0, vmovl_high_s16(accu32_0));
         accu_1 = vaddq_s32(accu_1, vmovl_s16(vget_low_s16(accu32_1)));
@@ -275,9 +300,9 @@ void ggml_vec_dot_i2_i8_s(int n, float * s, size_t bs, const void * vx, size_t b
 #endif
     }
 
+    // Process the remaining blocks that don't fit into a full group of 32.
     for (int i = 0; i < groupla_num; i++){
 #if defined(__ARM_FEATURE_DOTPROD)
-
 #else
         int16x8_t accula_0 = vdupq_n_s16(0);
         int16x8_t accula_1 = vdupq_n_s16(0);
@@ -353,8 +378,9 @@ void ggml_vec_dot_i2_i8_s(int n, float * s, size_t bs, const void * vx, size_t b
         accu_3 = vaddq_s32(accu_3, vmovl_high_s16(accula_3));
 #endif
     }
+    // Horizontally add the final accumulator vectors to get the single dot product result.
     accu_0 = vaddq_s32(accu_0, accu_1);
-    accu_2 = vaddq_s32(accu_2, accu_3);
+    accu_2 = vaddq_s32(accu_2, accu_3); // compliler parallelizes
     accu_0 = vaddq_s32(accu_0, accu_2);
     int sumi = vaddlvq_s32(accu_0);
     *s = (float)sumi;

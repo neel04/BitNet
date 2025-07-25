@@ -45,3 +45,5 @@ poetry.toml
 
 build/
 logs/
+.opencode
+AGENTS.md
