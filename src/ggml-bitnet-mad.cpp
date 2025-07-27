@@ -1,12 +1,15 @@
-#include <iostream>
-#include <vector>
 #include <arm_neon.h>
+
+#include <cmath>
+#include <cstring>
+#include <mutex>
 #include <type_traits>
+#include <vector>
 
 #include "ggml-bitnet.h"
 #include "ggml-quants.h"
-#include <cmath>
-#include <cstring>
+
+#include "utils.cpp"
 
 #define QK_I2_S 128
 #define QK_I2 128
@@ -18,18 +21,17 @@ static inline int hsum_i32_8(const __m256i a) {
     const __m128i sum128 = _mm_add_epi32(_mm256_castsi256_si128(a), _mm256_extractf128_si256(a, 1));
     const __m128i hi64 = _mm_unpackhi_epi64(sum128, sum128);
     const __m128i sum64 = _mm_add_epi32(hi64, sum128);
-    const __m128i hi32  = _mm_shuffle_epi32(sum64, _MM_SHUFFLE(2, 3, 0, 1));
+    const __m128i hi32 = _mm_shuffle_epi32(sum64, _MM_SHUFFLE(2, 3, 0, 1));
     return _mm_cvtsi128_si32(_mm_add_epi32(sum64, hi32));
 }
 #elif defined(__loongarch_asx)
 // horizontally add 8 int32_t
 static inline int hsum_i32_8(const __m256i a) {
-
     __m256i tmp1 = __lasx_xvpermi_q(a, a, 0x11);
     __m256i tmp2 = __lasx_xvpermi_q(a, a, 0x00);
 
-    __m128i  tmp1_128 = lasx_extracti128_lo(tmp1);
-    __m128i  tmp2_128 = lasx_extracti128_lo(tmp2);
+    __m128i tmp1_128 = lasx_extracti128_lo(tmp1);
+    __m128i tmp2_128 = lasx_extracti128_lo(tmp2);
 
     __m128i sum128 = __lsx_vadd_w(tmp1_128, tmp2_128);
 
@@ -41,11 +43,11 @@ static inline int hsum_i32_8(const __m256i a) {
     sum64_1 = __lsx_vpickve2gr_w(sum64, 0);
     sum64_2 = __lsx_vpickve2gr_w(sum64, 1);
 
-    return  sum64_1 + sum64_2;
+    return sum64_1 + sum64_2;
 }
 #endif
 
-size_t quantize_i2_s(const float * src, void * dst, int64_t nrow, int64_t n_per_row, const float * quant_weights) {
+size_t quantize_i2_s(const float *src, void *dst, int64_t nrow, int64_t n_per_row, const float *quant_weights) {
     // 2 bits per weight
 
     size_t row_size = ggml_row_size(GGML_TYPE_I2_S, n_per_row);
@@ -59,8 +61,8 @@ size_t quantize_i2_s(const float * src, void * dst, int64_t nrow, int64_t n_per_
     }
     double i2_scale = max;
 
-    uint8_t* q8 = (uint8_t*)malloc(n * sizeof(uint8_t));
-    for (int i=0; i<n; i++) {
+    uint8_t *q8 = (uint8_t *)malloc(n * sizeof(uint8_t));
+    for (int i = 0; i < n; i++) {
         if (fabs((double)(src[i])) < 1e-6) {
             q8[i] = 1;
             continue;
@@ -74,7 +76,7 @@ size_t quantize_i2_s(const float * src, void * dst, int64_t nrow, int64_t n_per_
     //       |  |  |
     //      -1, 0, 1
 
-    uint8_t* i2_weight = (uint8_t*)dst;
+    uint8_t *i2_weight = (uint8_t *)dst;
     for (int i = 0; i < n / QK_I2; i++) { // i: block index
         for (int j = 0; j < QK_I2; j++) {
             int group_idx = j / 32; // 4x int2 == int8
@@ -84,7 +86,7 @@ size_t quantize_i2_s(const float * src, void * dst, int64_t nrow, int64_t n_per_
         }
     }
 
-    float* scale_ptr = (float*)((char*)i2_weight + n / 4);
+    float *scale_ptr = (float *)((char *)i2_weight + n / 4);
     scale_ptr[0] = i2_scale; // 8 bits of packed weights + 1 bit scalar for scaling
 
     free(q8);
@@ -105,9 +107,11 @@ size_t quantize_i2_s(const float * src, void * dst, int64_t nrow, int64_t n_per_
  * @param by     Byte stride for the `vy` matrix.
  * @param nrc    The number of row dot products to compute.
  */
-void ggml_vec_dot_i2_i8_s(int n, float * s, size_t bs, const void * vx, size_t bx, const void * vy, size_t by, int nrc) {
-    const uint8_t *    x = (uint8_t *)vx;
-    const int8_t  *    y = (int8_t *)vy;
+void ggml_vec_dot_i2_i8_s(int n, float *s, size_t bs, const void *vx, size_t bx, const void *vy, size_t by, int nrc) {
+    print_once("\n === Using BitNet Kernel! ===\n");
+
+    const uint8_t *x = (uint8_t *)vx;
+    const int8_t *y = (int8_t *)vy;
 
     const int nb = n / QK_I2_S;
     const int group32_num = nb / 32;
@@ -119,80 +123,80 @@ void ggml_vec_dot_i2_i8_s(int n, float * s, size_t bs, const void * vx, size_t b
     __m256i mask = _mm256_set1_epi8(0x03);
     __m256i accu = _mm256_setzero_si256();
 
-    for (int i=0; i < group32_num; i++){
+    for (int i = 0; i < group32_num; i++) {
         __m256i accu32 = _mm256_setzero_si256();
-        for (int j=0; j < 32; j++) {
-        // 128 index
-        __m256i xq8_3 = _mm256_loadu_si256((const __m256i*)(x + i * 32 * 32 + j * 32));
-        __m256i xq8_2 = _mm256_srli_epi16(xq8_3, 2);
-        __m256i xq8_1 = _mm256_srli_epi16(xq8_3, 4);
-        __m256i xq8_0 = _mm256_srli_epi16(xq8_3, 6);
+        for (int j = 0; j < 32; j++) {
+            // 128 index
+            __m256i xq8_3 = _mm256_loadu_si256((const __m256i *)(x + i * 32 * 32 + j * 32));
+            __m256i xq8_2 = _mm256_srli_epi16(xq8_3, 2);
+            __m256i xq8_1 = _mm256_srli_epi16(xq8_3, 4);
+            __m256i xq8_0 = _mm256_srli_epi16(xq8_3, 6);
 
-        // each 32 index
-        xq8_3 = _mm256_and_si256(xq8_3, mask);
-        xq8_2 = _mm256_and_si256(xq8_2, mask);
-        xq8_1 = _mm256_and_si256(xq8_1, mask);
-        xq8_0 = _mm256_and_si256(xq8_0, mask);
+            // each 32 index
+            xq8_3 = _mm256_and_si256(xq8_3, mask);
+            xq8_2 = _mm256_and_si256(xq8_2, mask);
+            xq8_1 = _mm256_and_si256(xq8_1, mask);
+            xq8_0 = _mm256_and_si256(xq8_0, mask);
 
-        // each 32 index
-        __m256i yq8_0 = _mm256_loadu_si256((const __m256i*)(y + i * 128 * 32 + j * 128 + 0));
-        __m256i yq8_1 = _mm256_loadu_si256((const __m256i*)(y + i * 128 * 32 + j * 128 + 32));
-        __m256i yq8_2 = _mm256_loadu_si256((const __m256i*)(y + i * 128 * 32 + j * 128 + 64));
-        __m256i yq8_3 = _mm256_loadu_si256((const __m256i*)(y + i * 128 * 32 + j * 128 + 96));
+            // each 32 index
+            __m256i yq8_0 = _mm256_loadu_si256((const __m256i *)(y + i * 128 * 32 + j * 128 + 0));
+            __m256i yq8_1 = _mm256_loadu_si256((const __m256i *)(y + i * 128 * 32 + j * 128 + 32));
+            __m256i yq8_2 = _mm256_loadu_si256((const __m256i *)(y + i * 128 * 32 + j * 128 + 64));
+            __m256i yq8_3 = _mm256_loadu_si256((const __m256i *)(y + i * 128 * 32 + j * 128 + 96));
 
-        // 128 index accumulation add
-        // split into 32 accumulation block
-        // each block each 128 index accumulated 4index
-        // each index maximum 256
-        // each block maximum 4 * 256
-        // each block accumulation maximum 127 * 256
-        // each 32 group index (128 index in one group) needs cast to int32
-        xq8_0 = _mm256_maddubs_epi16(xq8_0, yq8_0);
-        xq8_1 = _mm256_maddubs_epi16(xq8_1, yq8_1);
-        xq8_2 = _mm256_maddubs_epi16(xq8_2, yq8_2);
-        xq8_3 = _mm256_maddubs_epi16(xq8_3, yq8_3);
+            // 128 index accumulation add
+            // split into 32 accumulation block
+            // each block each 128 index accumulated 4index
+            // each index maximum 256
+            // each block maximum 4 * 256
+            // each block accumulation maximum 127 * 256
+            // each 32 group index (128 index in one group) needs cast to int32
+            xq8_0 = _mm256_maddubs_epi16(xq8_0, yq8_0);
+            xq8_1 = _mm256_maddubs_epi16(xq8_1, yq8_1);
+            xq8_2 = _mm256_maddubs_epi16(xq8_2, yq8_2);
+            xq8_3 = _mm256_maddubs_epi16(xq8_3, yq8_3);
 
-        accu32 = _mm256_add_epi16(accu32, _mm256_add_epi16(xq8_0, xq8_1));
-        accu32 = _mm256_add_epi16(accu32, _mm256_add_epi16(xq8_2, xq8_3));
+            accu32 = _mm256_add_epi16(accu32, _mm256_add_epi16(xq8_0, xq8_1));
+            accu32 = _mm256_add_epi16(accu32, _mm256_add_epi16(xq8_2, xq8_3));
         }
         accu = _mm256_add_epi32(_mm256_madd_epi16(accu32, _mm256_set1_epi16(1)), accu);
     }
 
-    for (int i = 0; i < groupla_num; i++){
+    for (int i = 0; i < groupla_num; i++) {
         __m256i accula = _mm256_setzero_si256();
         for (int j = 0; j < la_num; j++) {
-        // 128 index
-        __m256i xq8_3 = _mm256_loadu_si256((const __m256i*)(x + group32_num * 32 * 32 + j * 32));
-        __m256i xq8_2 = _mm256_srli_epi16(xq8_3, 2);
-        __m256i xq8_1 = _mm256_srli_epi16(xq8_3, 4);
-        __m256i xq8_0 = _mm256_srli_epi16(xq8_3, 6);
+            // 128 index
+            __m256i xq8_3 = _mm256_loadu_si256((const __m256i *)(x + group32_num * 32 * 32 + j * 32));
+            __m256i xq8_2 = _mm256_srli_epi16(xq8_3, 2);
+            __m256i xq8_1 = _mm256_srli_epi16(xq8_3, 4);
+            __m256i xq8_0 = _mm256_srli_epi16(xq8_3, 6);
 
-        // each 32 index
-        xq8_3 = _mm256_and_si256(xq8_3, mask);
-        xq8_2 = _mm256_and_si256(xq8_2, mask);
-        xq8_1 = _mm256_and_si256(xq8_1, mask);
-        xq8_0 = _mm256_and_si256(xq8_0, mask);
+            // each 32 index
+            xq8_3 = _mm256_and_si256(xq8_3, mask);
+            xq8_2 = _mm256_and_si256(xq8_2, mask);
+            xq8_1 = _mm256_and_si256(xq8_1, mask);
+            xq8_0 = _mm256_and_si256(xq8_0, mask);
 
-        // each 32 index
-        __m256i yq8_0 = _mm256_loadu_si256((const __m256i*)(y + group32_num * 128 * 32 + j * 128 + 0));
-        __m256i yq8_1 = _mm256_loadu_si256((const __m256i*)(y + group32_num * 128 * 32 + j * 128 + 32));
-        __m256i yq8_2 = _mm256_loadu_si256((const __m256i*)(y + group32_num * 128 * 32 + j * 128 + 64));
-        __m256i yq8_3 = _mm256_loadu_si256((const __m256i*)(y + group32_num * 128 * 32 + j * 128 + 96));
+            // each 32 index
+            __m256i yq8_0 = _mm256_loadu_si256((const __m256i *)(y + group32_num * 128 * 32 + j * 128 + 0));
+            __m256i yq8_1 = _mm256_loadu_si256((const __m256i *)(y + group32_num * 128 * 32 + j * 128 + 32));
+            __m256i yq8_2 = _mm256_loadu_si256((const __m256i *)(y + group32_num * 128 * 32 + j * 128 + 64));
+            __m256i yq8_3 = _mm256_loadu_si256((const __m256i *)(y + group32_num * 128 * 32 + j * 128 + 96));
 
-        // 128 index accumulation add
-        // split into 32 accumulation block
-        // each block each 128 index accumulated 4index
-        // each index maximum 256
-        // each block maximum 4 * 256
-        // each block accumulation maximum 127 * 256
-        // each 32 group index (128 index in one group) needs cast to int32
-        xq8_0 = _mm256_maddubs_epi16(xq8_0, yq8_0);
-        xq8_1 = _mm256_maddubs_epi16(xq8_1, yq8_1);
-        xq8_2 = _mm256_maddubs_epi16(xq8_2, yq8_2);
-        xq8_3 = _mm256_maddubs_epi16(xq8_3, yq8_3);
+            // 128 index accumulation add
+            // split into 32 accumulation block
+            // each block each 128 index accumulated 4index
+            // each index maximum 256
+            // each block maximum 4 * 256
+            // each block accumulation maximum 127 * 256
+            // each 32 group index (128 index in one group) needs cast to int32
+            xq8_0 = _mm256_maddubs_epi16(xq8_0, yq8_0);
+            xq8_1 = _mm256_maddubs_epi16(xq8_1, yq8_1);
+            xq8_2 = _mm256_maddubs_epi16(xq8_2, yq8_2);
+            xq8_3 = _mm256_maddubs_epi16(xq8_3, yq8_3);
 
-        accula = _mm256_add_epi16(accula, _mm256_add_epi16(xq8_0, xq8_1));
-        accula = _mm256_add_epi16(accula, _mm256_add_epi16(xq8_2, xq8_3));
+            accula = _mm256_add_epi16(accula, _mm256_add_epi16(xq8_0, xq8_1));
+            accula = _mm256_add_epi16(accula, _mm256_add_epi16(xq8_2, xq8_3));
         }
         accu = _mm256_add_epi32(accu, _mm256_madd_epi16(accula, _mm256_set1_epi16(1)));
     }
@@ -208,7 +212,7 @@ void ggml_vec_dot_i2_i8_s(int n, float * s, size_t bs, const void * vx, size_t b
     const uint8x16_t mask = vdupq_n_u8(3); // Mask for isolating 2-bit values (0b00000011).
 
     // Process major blocks of the matrix.
-    for (int i=0; i < group32_num; i++) {
+    for (int i = 0; i < group32_num; i++) {
 
 #if defined(__ARM_FEATURE_DOTPROD)
 
@@ -221,7 +225,7 @@ void ggml_vec_dot_i2_i8_s(int n, float * s, size_t bs, const void * vx, size_t b
 #endif
 
         // Process sub-blocks within a major block.
-        for (int j=0; j < 32; j++) {
+        for (int j = 0; j < 32; j++) {
             // Load 32 bytes, corresponding to 128 2-bit weights.
             uint8x16_t xq8_6 = vld1q_u8(x + i * 32 * 32 + j * 32);
             uint8x16_t xq8_7 = vld1q_u8(x + i * 32 * 32 + j * 32 + 16);
@@ -301,7 +305,7 @@ void ggml_vec_dot_i2_i8_s(int n, float * s, size_t bs, const void * vx, size_t b
     }
 
     // Process the remaining blocks that don't fit into a full group of 32.
-    for (int i = 0; i < groupla_num; i++){
+    for (int i = 0; i < groupla_num; i++) {
 #if defined(__ARM_FEATURE_DOTPROD)
 #else
         int16x8_t accula_0 = vdupq_n_s16(0);

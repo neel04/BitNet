@@ -1,0 +1,73 @@
+# BitNet.cpp clangd configuration
+# Enforces 4-space indentation and other code style conventions
+
+
+  
+Index:
+  Background: Build
+
+Completion:
+  AllScopes: Yes
+
+InlayHints:
+  Enabled: Yes
+  ParameterNames: Yes
+  DeducedTypes: Yes
+
+Hover:
+  ShowAKA: Yes
+
+Diagnostics:
+  UnusedIncludes: Strict
+  MissingIncludes: Strict
+
+Format:
+  IndentWidth: 4
+  TabWidth: 4
+  
+  # Consistent brace style
+  BreakBeforeBraces: Attach
+  
+  # Function parameters and arguments
+  AllowAllParametersOfDeclarationOnNextLine: true
+  BinPackParameters: false
+  BinPackArguments: false
+  
+  # Alignment
+  AlignAfterOpenBracket: Align
+  AlignConsecutiveAssignments: false
+  AlignConsecutiveDeclarations: false
+  AlignOperands: true
+  
+  # Spacing
+  SpaceAfterCStyleCast: false
+  SpaceAfterTemplateKeyword: true
+  SpaceBeforeAssignmentOperators: true
+  SpaceBeforeParens: ControlStatements
+  SpaceInEmptyParentheses: false
+  SpacesBeforeTrailingComments: 1
+  SpacesInAngles: false
+  SpacesInContainerLiterals: false
+  SpacesInCStyleCastParentheses: false
+  SpacesInParentheses: false
+  SpacesInSquareBrackets: false
+  
+  # Line breaks
+  AllowShortBlocksOnASingleLine: false
+  AllowShortCaseLabelsOnASingleLine: false
+  AllowShortFunctionsOnASingleLine: true
+  AllowShortIfStatementsOnASingleLine: false
+  AllowShortLoopsOnASingleLine: false
+  
+  # Includes
+  SortIncludes: true
+  
+  # Line length
+  ColumnLimit: 120
+  
+  # Pointer alignment
+  PointerAlignment: Right
+  
+  # Keep existing line breaks in some cases
+  KeepEmptyLinesAtTheStartOfBlocks: false
+  MaxEmptyLinesToKeep: 1
