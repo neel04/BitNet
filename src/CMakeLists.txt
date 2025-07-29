@@ -1,6 +1,5 @@
-set(GGML_HEADERS_BITNET ../include/ggml-bitnet.h)
-set(GGML_SOURCES_BITNET ggml-bitnet-mad.cpp)
-set(GGML_SOURCES_BITNET ggml-bitnet-lut.cpp)
+set(GGML_HEADERS_BITNET ../include/ggml-bitnet.h ../include/utils.h)
+set(GGML_SOURCES_BITNET ggml-bitnet-mad.cpp ggml-bitnet-lut.cpp ggml-bitnet-rsr.cpp utils.cpp)
 
 include_directories(3rdparty/llama.cpp/ggml/include)
 

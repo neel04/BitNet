@@ -59,6 +59,7 @@ static bool do_permutate(enum ggml_type type) {
     }
 }
 
+// If Bitnet can do it, then RSR can do it
 bool ggml_bitnet_can_mul_mat(const struct ggml_tensor *src0,
                              const struct ggml_tensor *src1,
                              const struct ggml_tensor *dst) {
@@ -74,9 +75,14 @@ bool ggml_bitnet_can_mul_mat(const struct ggml_tensor *src0,
 size_t ggml_bitnet_mul_mat_get_wsize(const struct ggml_tensor *src0,
                                      const struct ggml_tensor *src1,
                                      const struct ggml_tensor *dst) {
-    const size_t ne01 = src0->ne[1];
-    const size_t ne10 = src1->ne[0];
-    const size_t ne11 = src1->ne[1];
+    // Check for RSR override
+    if (getenv("BITNET_USE_RSR")) {
+        return ggml_bitnet_rsr_mul_mat_get_wsize(src0, src1, dst);
+    }
+
+    const size_t ne01 = src0->ne[1]; // src0 bsz
+    const size_t ne10 = src1->ne[0]; // src1 features
+    const size_t ne11 = src1->ne[1]; // src1 bsz
     const int bits = ggml_bitnet_get_type_bits(src0->type);
 
     size_t wsize = ne10 * ne11 * 15 * sizeof(int8_t) + 1 * ne11 * 2 * sizeof(bitnet_float_type);
@@ -99,6 +105,9 @@ int ggml_bitnet_get_type_bits(enum ggml_type type) {
     }
 }
 
+// ====================================
+// ++++++++++++++ x86 +++++++++++++++++
+// ====================================
 #endif
 #if defined(GGML_BITNET_X86_TL2)
 void ggml_bitnet_init(void) {

@@ -1,15 +1,17 @@
 #include <arm_neon.h>
 
 #include <cmath>
+#include <cstdlib>
 #include <cstring>
+#include <iostream>
 #include <mutex>
 #include <type_traits>
 #include <vector>
 
+#include "utils.h"
 #include "ggml-bitnet.h"
+#include "ggml-bitnet-rsr.h"
 #include "ggml-quants.h"
-
-#include "utils.cpp"
 
 #define QK_I2_S 128
 #define QK_I2 128
@@ -108,7 +110,13 @@ size_t quantize_i2_s(const float *src, void *dst, int64_t nrow, int64_t n_per_ro
  * @param nrc    The number of row dot products to compute.
  */
 void ggml_vec_dot_i2_i8_s(int n, float *s, size_t bs, const void *vx, size_t bx, const void *vy, size_t by, int nrc) {
-    print_once("\n === Using BitNet Kernel! ===\n");
+    if (getenv("BITNET_USE_RSR")) {
+        print_once("\n === Using BitNet RSR Kernel! ===\n");
+        ggml_rsr_vec_dot_i2_i8_s(n, s, bs, vx, bx, vy, by, nrc);
+        return;
+    }
+
+    print_once("\n === Using BitNet MAD Kernel! ===\n");
 
     const uint8_t *x = (uint8_t *)vx;
     const int8_t *y = (int8_t *)vy;
