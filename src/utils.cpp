@@ -1,11 +1,13 @@
 #include "utils.h"
+
 #include <stdlib.h>
+
+#include <cmath>
+#include <cstdint>
 #include <iostream>
 #include <mutex>
 #include <string>
-#include <utility>
 #include <vector>
-#include <cstdint>
 
 using namespace std;
 
@@ -25,13 +27,13 @@ void print_once(const std::string &message) {
     call_once(logged_flag, [&message]() { cout << message << endl; });
 }
 
-std::vector<int8_t> unpack_i2_s(const uint8_t* data, size_t num_bytes) {
+std::vector<int8_t> unpack_i2_s(const uint8_t *data, size_t num_bytes) {
     std::vector<int8_t> unpacked_data;
     unpacked_data.reserve(num_bytes * 4);
 
     for (size_t i = 0; i < num_bytes; ++i) {
         uint8_t packed_byte = data[i];
-        
+
         // Unpack the 4 x 2-bit values from the byte.
         // The packing order is high-bits to low-bits:
         // Bits 7,6 -> first value
@@ -60,4 +62,91 @@ VecPair<uint8_t> ternary_to_binary(vector<int8_t> ternary, size_t num_bytes) {
     }
 
     return VecPair<uint8_t>(bin1, bin2);
+}
+
+VecPair<vector<uint8_t>> preprocess(vector<vector<uint8_t>> &mat, int k) {
+    int n = mat.size();
+
+    // Padding
+    int padding = (k - n % k) % k;
+    for (auto &row : mat) {
+        row.resize(row.size() + padding, 0);
+    }
+
+    for (int i = 0; i < padding; i++) {
+        mat.push_back(vector<uint8_t>(n + padding, 0));
+    }
+    n = n + padding;
+
+    vector<vector<uint8_t>> permutations(n / k, vector<uint8_t>(n));
+    vector<vector<uint8_t>> segs(n / k, vector<uint8_t>(pow(2, k)));
+
+    // Splitting into blocks (columnwise) for `handle_block`
+    int start;
+    int end;
+
+    vector<vector<uint8_t>> block(n, vector<uint8_t>(k));
+
+    for (int i = 0; i < n / k; i++) {
+        // cout << "block " << i + 1 << " out of " << n / k << " blocks" << endl;
+        start = i * k;
+        end = start + k;
+        for (int col = start; col < end; col++) {
+            for (int row = 0; row < n; row++) {
+                block[row][col - start] = mat[row][col];
+            }
+        }
+        auto per_seg = handle_block(block);
+        permutations[i] = per_seg.a;
+        segs[i] = per_seg.b;
+    }
+
+    return VecPair<vector<uint8_t>>(permutations, segs);
+}
+
+vector<int> rsr_forward(vector<int> v,
+                        const vector<vector<int>> &perms,
+                        const vector<vector<int>> &segs,
+                        vector<vector<int>> bin_k,
+                        int k) {
+    int n = perms[0].size();
+
+    // Segmented Sums
+    vector<vector<int>> us(perms.size(), vector<int>(pow(2, k)));
+
+    int start, end;
+    vector<int> segment, permutation;
+
+    for (size_t i = 0; i < perms.size(); i++) {
+        segment = segs[i];
+        permutation = perms[i];
+
+        for (size_t j = 0; j < segs.size(); j++) {
+            start = segment[j];
+
+            if (j < segment.size() - 1) {
+                end = segment[j + 1];
+            } else {
+                end = n;
+            }
+
+            // Compute the segmented sum
+            for (int index = start; index < end; index++) {
+                us[i][j] += v[permutation[index]];
+            }
+        }
+    }
+
+    vector<int> result(n), partial_result;
+
+    // Block product to Bin_k
+    for (size_t i = 0; i < us.size(); i++) {
+        partial_result = vectorMatrixMultiply(us[i], bin_k);
+
+        for (int j = 0; j < k; j++) {
+            result[i * k + j] = partial_result[j];
+        }
+    }
+
+    return result;
 }

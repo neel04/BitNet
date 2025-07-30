@@ -7,7 +7,10 @@
 #include <string>
 #include <vector>
 
-// A struct to hold the permutation and segmentation vectors, making the code more readable.
+int binaryVectorToInt(const std::vector<int> &binaryVec);
+
+void print_once(const std::string &message);
+
 template <typename T> struct VecPair {
     std::vector<T> a;
     std::vector<T> b;
@@ -15,8 +18,6 @@ template <typename T> struct VecPair {
     VecPair(const std::vector<T> &a, const std::vector<T> &b) : a(a), b(b) {
     }
 };
-
-int binaryVectorToInt(const std::vector<int> &binaryVec);
 
 template <typename T> VecPair<T> handle_block(std::vector<std::vector<T>> mat_block) {
     int n = mat_block.size();
@@ -38,7 +39,6 @@ template <typename T> VecPair<T> handle_block(std::vector<std::vector<T>> mat_bl
     });
 
     // Segmentation
-    __builtin_debugtrap();
     std::vector<int> seg(pow(2, k), -1);
     seg[0] = 0;
     for (int row = 0; row < n; row++) {
@@ -48,7 +48,6 @@ template <typename T> VecPair<T> handle_block(std::vector<std::vector<T>> mat_bl
             seg[value] = row;
         }
     }
-
 
     if (seg.size() > 0 && seg[seg.size() - 1] == -1) {
         seg[seg.size() - 1] = n;
@@ -66,7 +65,22 @@ template <typename T> VecPair<T> handle_block(std::vector<std::vector<T>> mat_bl
     return {std::vector<T>(permutation.begin(), permutation.end()), std::vector<T>(seg.begin(), seg.end())};
 }
 
-void print_once(const std::string &message);
+template <typename T>
+std::vector<T> vectorMatrixMultiply(const std::vector<T> &vec, const std::vector<std::vector<T>> &mat) {
+    int n = vec.size();
+
+    // Initialize the result vector with zeros
+    std::vector<int> result(n, 0);
+
+    // Perform vector-matrix multiplication
+    for (int i = 0; i < n; i++) {
+        for (int j = 0; j < n; j++) {
+            result[i] += vec[j] * mat[j][i];
+        }
+    }
+
+    return result;
+}
 
 /**
  * @brief Unpacks a block of 2-bit quantized data into a vector of ternary values.
@@ -80,6 +94,15 @@ void print_once(const std::string &message);
  * @return A vector of unpacked 8-bit integers, each representing a ternary value.
  */
 std::vector<int8_t> unpack_i2_s(const uint8_t *data, size_t num_bytes);
+
 VecPair<uint8_t> ternary_to_binary(std::vector<int8_t> ternary, size_t num_bytes);
+
+VecPair<std::vector<uint8_t>> preprocess(std::vector<std::vector<uint8_t>> &mat, int k);
+
+std::vector<int> rsr_forward(std::vector<int> v,
+                             const std::vector<std::vector<int>> &perms,
+                             const std::vector<std::vector<int>> &segs,
+                             std::vector<std::vector<int>> bin_k,
+                             int k);
 
 #endif

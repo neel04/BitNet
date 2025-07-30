@@ -24,6 +24,7 @@ using namespace std;
 
 const int BLOCK_SIZE = 16;
 const int TILE_SIZE = 8;
+const int K = 8;
 
 /**
  * @brief Computes the dot product of `nrc` rows from a 2-bit quantized matrix `vx` and an 8-bit quantized matrix `vy`.
@@ -69,14 +70,13 @@ void ggml_rsr_vec_dot_i2_i8_s(
                     tile_buffer1[i * 4 + k][j] = unpacked_bin.a[k];
                     tile_buffer2[i * 4 + k][j] = unpacked_bin.b[k];
                 }
+
+                __builtin_debugtrap();
+                auto processed_buffer1 = preprocess(tile_buffer1, K);
+                auto processed_buffer2 = preprocess(tile_buffer2, K);
+                __builtin_debugtrap();
             }
         }
-
-        VecPair<uint8_t> perm_segs_1 = handle_block(tile_buffer1);
-        VecPair<uint8_t> perm_segs_2 = handle_block(tile_buffer2);
-
-        auto [permutation1, segmentation1] = perm_segs_1;
-        auto [permutation2, segmentation2] = perm_segs_2;
 
         std::runtime_error("RSR Matmul not implemented yet!");
     }
