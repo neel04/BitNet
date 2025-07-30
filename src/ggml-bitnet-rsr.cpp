@@ -10,11 +10,12 @@
 #include <iostream>
 #include <ostream>
 #include <stdexcept>
+#include <utility>
 #include <vector>
 
-#include "utils.h"
 #include "ggml-bitnet.h"
 #include "ggml.h"
+#include "utils.h"
 
 #define QK_I2_S 128
 #define QK_I2 128
@@ -46,22 +47,39 @@ void ggml_rsr_vec_dot_i2_i8_s(
     const int la_num = nb % BLOCK_SIZE;                   // number of leftovers
     const int groupla_num = nb % BLOCK_SIZE != 0 ? 1 : 0; // 1 or 0 groups to bunch all leftover elems in
 
-    // Load a tile
+    // Load a tile and unpack out the 2x binary vectors
     for (int group = 0; group < group_bnum; group++) {
         const uint8_t *group_start = x + group * BLOCK_SIZE * BLOCK_SIZE;
 
-        // Initialize a buffer of 0s
-        vector<vector<uint8_t>> tile_buffer(TILE_SIZE, vector<uint8_t>(TILE_SIZE, 0));
+        // Initialize buffers with 4x rows
+        vector<vector<uint8_t>> tile_buffer1(TILE_SIZE * 4, vector<uint8_t>(TILE_SIZE, 0));
+        vector<vector<uint8_t>> tile_buffer2(TILE_SIZE * 4, vector<uint8_t>(TILE_SIZE, 0));
 
-        for (int i = 0; i < TILE_SIZE; i++) {
-            for (int j = 0; j < TILE_SIZE; j++) {
-                int idx = group * TILE_SIZE * TILE_SIZE + i * TILE_SIZE + j;
-                tile_buffer[i][j] = (uint8_t)x[idx]; // scalar load, 🙏 for autovectorization
+        for (uint8_t i = 0; i < TILE_SIZE; i++) {
+            for (uint8_t j = 0; j < TILE_SIZE; j++) {
+                uint8_t idx_in_tile = i * TILE_SIZE + j;
+
+                // Unpack 1 byte into 4 ternary values
+                vector<int8_t> unpacked_ternary = unpack_i2_s(group_start + idx_in_tile, 1);
+
+                // Convert 4 ternary values to 2 binary vectors of 4 elements each
+                VecPair<uint8_t> unpacked_bin = ternary_to_binary(unpacked_ternary, 4);
+
+                for (int k = 0; k < 4; k++) {
+                    tile_buffer1[i * 4 + k][j] = unpacked_bin.a[k];
+                    tile_buffer2[i * 4 + k][j] = unpacked_bin.b[k];
+                }
             }
         }
-    }
 
-    throw std::runtime_error("RSR Matmul is not implemented yet.");
+        VecPair<uint8_t> perm_segs_1 = handle_block(tile_buffer1);
+        VecPair<uint8_t> perm_segs_2 = handle_block(tile_buffer2);
+
+        auto [permutation1, segmentation1] = perm_segs_1;
+        auto [permutation2, segmentation2] = perm_segs_2;
+
+        std::runtime_error("RSR Matmul not implemented yet!");
+    }
 }
 
 void ggml_bitnet_rsr_mul_mat(struct ggml_tensor *dst, const struct ggml_tensor *src0, const struct ggml_tensor *src1) {

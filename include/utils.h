@@ -1,17 +1,85 @@
 #ifndef UTILS_H
 #define UTILS_H
 
+#include <cmath>
+#include <cstddef>
+#include <cstdint>
 #include <string>
 #include <vector>
-#include <utility>
 
-using namespace std;
+// A struct to hold the permutation and segmentation vectors, making the code more readable.
+template <typename T> struct VecPair {
+    std::vector<T> a;
+    std::vector<T> b;
 
-int binaryVectorToInt(const vector<int> &binaryVec);
+    VecPair(const std::vector<T> &a, const std::vector<T> &b) : a(a), b(b) {
+    }
+};
 
-template<typename T>
-pair<std::vector<T>, std::vector<T>> handle_block(vector<vector<T>> mat_block);
+int binaryVectorToInt(const std::vector<int> &binaryVec);
+
+template <typename T> VecPair<T> handle_block(std::vector<std::vector<T>> mat_block) {
+    int n = mat_block.size();
+    if (n == 0) {
+        return {{}, {}};
+    }
+    int k = mat_block[0].size();
+
+    // Permutation
+    std::vector<int> permutation(n);
+    for (int i = 0; i < n; i++) {
+        permutation[i] = i;
+    }
+
+    sort(permutation.begin(), permutation.end(), [&](int i, int j) {
+        std::vector<int> vec_i(mat_block[i].begin(), mat_block[i].end());
+        std::vector<int> vec_j(mat_block[j].begin(), mat_block[j].end());
+        return binaryVectorToInt(vec_i) < binaryVectorToInt(vec_j);
+    });
+
+    // Segmentation
+    __builtin_debugtrap();
+    std::vector<int> seg(pow(2, k), -1);
+    seg[0] = 0;
+    for (int row = 0; row < n; row++) {
+        std::vector<int> current_row(mat_block[permutation[row]].begin(), mat_block[permutation[row]].end());
+        int value = binaryVectorToInt(current_row);
+        if (seg[value] == -1) {
+            seg[value] = row;
+        }
+    }
+
+
+    if (seg.size() > 0 && seg[seg.size() - 1] == -1) {
+        seg[seg.size() - 1] = n;
+    }
+
+    int last_one = seg.empty() ? n : seg.back();
+
+    for (int i = seg.size() - 2; i >= 0; i--) {
+        if (seg[i] == -1) {
+            seg[i] = last_one;
+        }
+        last_one = seg[i];
+    }
+
+    return {std::vector<T>(permutation.begin(), permutation.end()), std::vector<T>(seg.begin(), seg.end())};
+}
 
 void print_once(const std::string &message);
 
-#endif // UTILS_H
+/**
+ * @brief Unpacks a block of 2-bit quantized data into a vector of ternary values.
+ *
+ * Each byte in the input data contains four 2-bit values. This function extracts
+ * these values and returns them as a vector of uint8_t, where each element is
+ * a value from 0 to 2, representing a ternary system (-1, 0, 1).
+ *
+ * @param data A pointer to the packed 2-bit data.
+ * @param num_bytes The number of bytes in the data block.
+ * @return A vector of unpacked 8-bit integers, each representing a ternary value.
+ */
+std::vector<int8_t> unpack_i2_s(const uint8_t *data, size_t num_bytes);
+VecPair<uint8_t> ternary_to_binary(std::vector<int8_t> ternary, size_t num_bytes);
+
+#endif
