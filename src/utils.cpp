@@ -28,24 +28,43 @@ void print_once(const std::string &message) {
 }
 
 std::vector<int8_t> unpack_i2_s(const uint8_t *data, size_t num_bytes) {
-    std::vector<int8_t> unpacked_data;
-    unpacked_data.reserve(num_bytes * 4);
+    std::vector<int8_t> unpacked_data; // TODO: std::array optimization
 
-    for (size_t i = 0; i < num_bytes; ++i) {
-        uint8_t packed_byte = data[i];
+    // Each 32-byte block contains 128 weights (4 weights per byte)
+    // BitNet uses interleaved layout: 4 groups of 32 weights each
+    const size_t block_size = num_bytes;             // 32 bytes per block
+    const size_t weights_per_block = block_size * 4; // 4 * 32 = 128 weights
+    const size_t num_blocks = num_bytes / block_size;
 
-        // Unpack the 4 x 2-bit values from the byte.
-        // The packing order is high-bits to low-bits:
-        // Bits 7,6 -> first value
-        // Bits 5,4 -> second value
-        // Bits 3,2 -> third value
-        // Bits 1,0 -> fourth value
-        // The values 0, 1, 2 correspond to a ternary system (-1, 0, 1),
-        // while the value 3 is unused.
-        unpacked_data.push_back(((packed_byte >> 6) & 0x03) - 1);
-        unpacked_data.push_back(((packed_byte >> 4) & 0x03) - 1);
-        unpacked_data.push_back(((packed_byte >> 2) & 0x03) - 1);
-        unpacked_data.push_back(((packed_byte >> 0) & 0x03) - 1);
+    unpacked_data.reserve(num_blocks * weights_per_block);
+
+    for (size_t block = 0; block < num_blocks; ++block) {
+        const uint8_t *block_data = data + block * block_size;
+
+        // Temporary storage for the 4 interleaved groups
+        std::vector<int8_t> group0(32), group1(32), group2(32), group3(32);
+
+        // Extract the 4 interleaved groups from the 32-byte block
+        for (size_t i = 0; i < block_size; ++i) {
+            uint8_t packed_byte = block_data[i];
+
+            // BitNet interleaved layout:
+            // Bits 7,6 -> group 0 (weights 0-31)
+            // Bits 5,4 -> group 1 (weights 32-63)
+            // Bits 3,2 -> group 2 (weights 64-95)
+            // Bits 1,0 -> group 3 (weights 96-127)
+            // Values 0,1,2 map to -1,0,1 (ternary)
+            group0[i] = ((packed_byte >> 6) & 0x03) - 1;
+            group1[i] = ((packed_byte >> 4) & 0x03) - 1;
+            group2[i] = ((packed_byte >> 2) & 0x03) - 1;
+            group3[i] = ((packed_byte >> 0) & 0x03) - 1;
+        }
+
+        // Append groups in linear order to create sequential layout
+        unpacked_data.insert(unpacked_data.end(), group0.begin(), group0.end());
+        unpacked_data.insert(unpacked_data.end(), group1.begin(), group1.end());
+        unpacked_data.insert(unpacked_data.end(), group2.begin(), group2.end());
+        unpacked_data.insert(unpacked_data.end(), group3.begin(), group3.end());
     }
 
     return unpacked_data;

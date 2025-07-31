@@ -4,6 +4,7 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include <algorithm>
 #include <cassert>
 #include <cstddef>
 #include <cstdint>
@@ -22,8 +23,7 @@
 
 using namespace std;
 
-const int BLOCK_SIZE = 16;
-const int TILE_SIZE = 8;
+const int BLOCK_SIZE = 32;
 const int K = 8;
 
 /**
@@ -43,43 +43,74 @@ void ggml_rsr_vec_dot_i2_i8_s(
     const uint8_t *x = (uint8_t *)vx;
     const int8_t *y = (int8_t *)vy;
 
-    const int nb = n / QK_I2_S;                           // number of blocks
-    const int group_bnum = nb / BLOCK_SIZE;               // number of BLOCK_SIZE-groups
-    const int la_num = nb % BLOCK_SIZE;                   // number of leftovers
-    const int groupla_num = nb % BLOCK_SIZE != 0 ? 1 : 0; // 1 or 0 groups to bunch all leftover elems in
+    const int nb = (n * 4) / QK_I2_S;                   // number of blocks
+    const int group_bnum = nb / 32;               // number of 32-groups
+    const int la_num = nb % 32;                   // number of leftovers
+    const int groupla_num = nb % 32 != 0 ? 1 : 0; // 1 or 0 groups to bunch all leftover elems in
 
     // Load a tile and unpack out the 2x binary vectors
     for (int group = 0; group < group_bnum; group++) {
         const uint8_t *group_start = x + group * BLOCK_SIZE * BLOCK_SIZE;
 
-        // Initialize buffers with 4x rows
-        vector<vector<uint8_t>> tile_buffer1(TILE_SIZE * 4, vector<uint8_t>(TILE_SIZE, 0));
-        vector<vector<uint8_t>> tile_buffer2(TILE_SIZE * 4, vector<uint8_t>(TILE_SIZE, 0));
+        // Initialize buffers with 4x cols
+        vector<vector<uint8_t>> tile_buffer1(BLOCK_SIZE, vector<uint8_t>(BLOCK_SIZE * 4, 0));
+        vector<vector<uint8_t>> tile_buffer2(BLOCK_SIZE, vector<uint8_t>(BLOCK_SIZE * 4, 0));
 
-        for (uint8_t i = 0; i < TILE_SIZE; i++) {
-            for (uint8_t j = 0; j < TILE_SIZE; j++) {
-                uint8_t idx_in_tile = i * TILE_SIZE + j;
+        for (uint8_t i = 0; i < BLOCK_SIZE; i++) {
+            for (uint8_t j = 0; j < BLOCK_SIZE; j++) {
+                uint8_t idx_in_tile = i * BLOCK_SIZE + j;
 
-                // Unpack 1 byte into 4 ternary values
-                vector<int8_t> unpacked_ternary = unpack_i2_s(group_start + idx_in_tile, 1);
+                // Unpack 32 byte into 32 * 4 = 128 ternary weights
+                vector<int8_t> unpacked_ternary = unpack_i2_s(group_start + idx_in_tile, 32);
 
-                // Convert 4 ternary values to 2 binary vectors of 4 elements each
-                VecPair<uint8_t> unpacked_bin = ternary_to_binary(unpacked_ternary, 4);
+                // Convert 128 ternary values to 2 binary vectors of 128 elements each
+                VecPair<uint8_t> unpacked_bin = ternary_to_binary(unpacked_ternary, 128);
 
-                for (int k = 0; k < 4; k++) {
-                    tile_buffer1[i * 4 + k][j] = unpacked_bin.a[k];
-                    tile_buffer2[i * 4 + k][j] = unpacked_bin.b[k];
+                for (int k = 0; k < 128; k++) {
+                    tile_buffer1[i][k] = unpacked_bin.a[k];
+                    tile_buffer2[i][k] = unpacked_bin.b[k];
+                }
+            }
+        }
+
+        // Unpack the permutations and segments
+        auto [perms_buf1, segs_buf1] = preprocess(tile_buffer1, K);
+        auto [perms_buf2, segs_buf2] = preprocess(tile_buffer2, K);
+    }
+
+    std::runtime_error("RSR Leftover group handling not implemented yet.");
+    // Process leftover elements that don't form complete 32x32 blocks
+    if (groupla_num > 0) {
+        const uint8_t *leftover_start = x + group_bnum * BLOCK_SIZE * BLOCK_SIZE;
+
+        // Initialize buffers with actual leftover dimensions
+        vector<vector<uint8_t>> tile_buffer1(la_num, vector<uint8_t>(la_num * 4, 0));
+        vector<vector<uint8_t>> tile_buffer2(la_num, vector<uint8_t>(la_num * 4, 0));
+
+        for (uint8_t i = 0; i < la_num; i++) {
+            for (uint8_t j = 0; j < la_num; j++) {
+                uint8_t idx_in_tile = i * la_num + j;
+
+               
+                __builtin_debugtrap();
+                vector<int8_t> unpacked_ternary = unpack_i2_s(leftover_start + idx_in_tile, la_num);
+                VecPair<uint8_t> unpacked_bin = ternary_to_binary(unpacked_ternary, la_num);
+
+                for (int k = 0; k < la_num; k++) {
+                    __builtin_debugtrap();
+                    tile_buffer1[idx_in_tile][k] = unpacked_bin.a[k];
+                    tile_buffer2[idx_in_tile][k] = unpacked_bin.b[k];
                 }
 
                 __builtin_debugtrap();
                 auto processed_buffer1 = preprocess(tile_buffer1, K);
                 auto processed_buffer2 = preprocess(tile_buffer2, K);
-                __builtin_debugtrap();
             }
         }
 
-        std::runtime_error("RSR Matmul not implemented yet!");
     }
+
+    std::runtime_error("RSR Matmul not implemented yet!");
 }
 
 void ggml_bitnet_rsr_mul_mat(struct ggml_tensor *dst, const struct ggml_tensor *src0, const struct ggml_tensor *src1) {
