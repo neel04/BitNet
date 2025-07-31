@@ -48,3 +48,9 @@ logs/
 .opencode
 AGENTS.md
 src/RSR
+CMakeFiles
+bin
+CMakeCache.txt
+LlamaConfigVersion.cmake
+build.ninja
+cmake_install.cmake

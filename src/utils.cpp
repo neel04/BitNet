@@ -2,10 +2,13 @@
 
 #include <stdlib.h>
 
+#include <algorithm>
+#include <cassert>
 #include <cmath>
 #include <cstdint>
 #include <iostream>
 #include <mutex>
+#include <random>
 #include <string>
 #include <vector>
 
@@ -83,7 +86,7 @@ VecPair<uint8_t> ternary_to_binary(vector<int8_t> ternary, size_t num_bytes) {
     return VecPair<uint8_t>(bin1, bin2);
 }
 
-VecPair<vector<uint8_t>> preprocess(vector<vector<uint8_t>> &mat, int k) {
+VecPair<vector<int8_t>> preprocess(vector<vector<uint8_t>> &mat, int k) {
     int n = mat.size();
 
     // Padding
@@ -97,8 +100,8 @@ VecPair<vector<uint8_t>> preprocess(vector<vector<uint8_t>> &mat, int k) {
     }
     n = n + padding;
 
-    vector<vector<uint8_t>> permutations(n / k, vector<uint8_t>(n));
-    vector<vector<uint8_t>> segs(n / k, vector<uint8_t>(pow(2, k)));
+    vector<vector<int8_t>> permutations(n / k, vector<int8_t>(n));
+    vector<vector<int8_t>> segs(n / k, vector<int8_t>(pow(2, k)));
 
     // Splitting into blocks (columnwise) for `handle_block`
     int start;
@@ -116,31 +119,28 @@ VecPair<vector<uint8_t>> preprocess(vector<vector<uint8_t>> &mat, int k) {
             }
         }
         auto per_seg = handle_block(block);
-        permutations[i] = per_seg.a;
-        segs[i] = per_seg.b;
+        permutations[i].assign(per_seg.a.begin(), per_seg.a.end());
+        segs[i].assign(per_seg.b.begin(), per_seg.b.end());
     }
 
-    return VecPair<vector<uint8_t>>(permutations, segs);
+    return VecPair<vector<int8_t>>(permutations, segs);
 }
 
-vector<int> rsr_forward(vector<int> v,
-                        const vector<vector<int>> &perms,
-                        const vector<vector<int>> &segs,
-                        vector<vector<int>> bin_k,
-                        int k) {
-    int n = perms[0].size();
+vector<vector<int8_t>>
+seg_sum(vector<int8_t> v, const vector<vector<int8_t>> &perms, const vector<vector<int8_t>> &segs, int8_t k) {
+    int8_t n = perms[0].size();
 
     // Segmented Sums
-    vector<vector<int>> us(perms.size(), vector<int>(pow(2, k)));
+    vector<vector<int8_t>> us(perms.size(), vector<int8_t>(pow(2, k)));
 
-    int start, end;
-    vector<int> segment, permutation;
+    uint8_t start, end;
+    vector<int8_t> segment, permutation;
 
     for (size_t i = 0; i < perms.size(); i++) {
         segment = segs[i];
         permutation = perms[i];
 
-        for (size_t j = 0; j < segs.size(); j++) {
+        for (size_t j = 0; j < segment.size(); j++) {
             start = segment[j];
 
             if (j < segment.size() - 1) {
@@ -150,22 +150,57 @@ vector<int> rsr_forward(vector<int> v,
             }
 
             // Compute the segmented sum
-            for (int index = start; index < end; index++) {
+            for (size_t index = start; index < end; index++) {
                 us[i][j] += v[permutation[index]];
             }
         }
     }
 
-    vector<int> result(n), partial_result;
+    return us;
+}
 
-    // Block product to Bin_k
-    for (size_t i = 0; i < us.size(); i++) {
-        partial_result = vectorMatrixMultiply(us[i], bin_k);
+vector<float> rsr_forward(const vector<vector<int8_t>> &seg_sums, const vector<vector<int8_t>> bin_k, int k) {
+    vector<float> result = vector<float>(seg_sums.size() * k, 0.f);
+    __builtin_debugtrap();
+
+    for (size_t i = 0; i < seg_sums.size(); i++) {
+        vector<int8_t> partial_results = vectorMatrixMultiply(seg_sums[i], bin_k);
 
         for (int j = 0; j < k; j++) {
-            result[i * k + j] = partial_result[j];
+            result[i * k + j] = partial_results[j];
         }
     }
 
     return result;
+}
+
+template <typename T> void matrix_transpose_inplace(std::vector<std::vector<T>> &matrix) {
+    if (matrix.empty() || matrix[0].empty()) {
+        return;
+    }
+
+    const size_t n = matrix.size();
+
+    // Only works for square matrices
+    assert(n == matrix[0].size() && "In-place transpose requires square matrix");
+
+    for (size_t i = 0; i < n; i++) {
+        for (size_t j = i + 1; j < n; j++) {
+            std::swap(matrix[i][j], matrix[j][i]);
+        }
+    }
+}
+
+vector<vector<int8_t>> generateBinaryMatrix(int k) {
+    int rows = pow(2, k);                                      // 2^k rows
+    vector<vector<int8_t>> matrix(rows, vector<int8_t>(k, 0)); // Initialize matrix with 0s
+
+    for (int i = 0; i < rows; ++i) {
+        for (int j = 0; j < k; ++j) {
+            // Generate the binary value for each position
+            matrix[i][k - j - 1] = (i >> j) & 1; // Extract the j-th bit from i
+        }
+    }
+
+    return matrix;
 }

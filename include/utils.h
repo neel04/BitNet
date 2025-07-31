@@ -66,11 +66,11 @@ template <typename T> VecPair<T> handle_block(std::vector<std::vector<T>> mat_bl
 }
 
 template <typename T>
-std::vector<T> vectorMatrixMultiply(const std::vector<T> &vec, const std::vector<std::vector<T>> &mat) {
+std::vector<int8_t> vectorMatrixMultiply(const std::vector<T> &vec, const std::vector<std::vector<T>> &mat) {
     int n = vec.size();
 
     // Initialize the result vector with zeros
-    std::vector<int> result(n, 0);
+    std::vector<int8_t> result(n, 0);
 
     // Perform vector-matrix multiplication
     for (int i = 0; i < n; i++) {
@@ -97,12 +97,34 @@ std::vector<int8_t> unpack_i2_s(const uint8_t *data, size_t num_bytes);
 
 VecPair<uint8_t> ternary_to_binary(std::vector<int8_t> ternary, size_t num_bytes);
 
-VecPair<std::vector<uint8_t>> preprocess(std::vector<std::vector<uint8_t>> &mat, int k);
+VecPair<std::vector<int8_t>> preprocess(std::vector<std::vector<uint8_t>> &mat, int k);
 
-std::vector<int> rsr_forward(std::vector<int> v,
-                             const std::vector<std::vector<int>> &perms,
-                             const std::vector<std::vector<int>> &segs,
-                             std::vector<std::vector<int>> bin_k,
-                             int k);
+/**
+ * @brief Performs RSR forward pass: computes dot products and combines results
+ *
+ * @param seg_sums1 Segmented sums for first binary matrix
+ * @param seg_sums2 Segmented sums for second binary matrix
+ * @param bin_patterns1 Binary patterns for first matrix
+ * @param bin_patterns2 Binary patterns for second matrix
+ * @param k Block size parameter
+ * @return Vector of float results (one per output row)
+ */
+std::vector<float>
+rsr_forward(const std::vector<std::vector<int8_t>> &seg_sums, const std::vector<std::vector<int8_t>> bin_k, int k);
+
+std::vector<std::vector<int8_t>> seg_sum(std::vector<int8_t> v,
+                                         const std::vector<std::vector<int8_t>> &perms,
+                                         const std::vector<std::vector<int8_t>> &segs,
+                                         int8_t k);
+
+/**
+ * @brief Transposes a 2D matrix in-place.
+ *
+ * @tparam T The data type of matrix elements
+ * @param matrix The matrix to transpose in-place (must be square)
+ */
+template <typename T> void matrix_transpose_inplace(std::vector<std::vector<T>> &matrix);
+
+std::vector<std::vector<int8_t>> generateBinaryMatrix(int k);
 
 #endif

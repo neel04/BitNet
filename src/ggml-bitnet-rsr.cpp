@@ -6,6 +6,7 @@
 
 #include <algorithm>
 #include <cassert>
+#include <cmath>
 #include <cstddef>
 #include <cstdint>
 #include <iostream>
@@ -24,7 +25,6 @@
 using namespace std;
 
 const int BLOCK_SIZE = 32;
-const int K = 8;
 
 /**
  * @brief Computes the dot product of `nrc` rows from a 2-bit quantized matrix `vx` and an 8-bit quantized matrix `vy`.
@@ -40,6 +40,9 @@ const int K = 8;
  */
 void ggml_rsr_vec_dot_i2_i8_s(
     int n, float *s, size_t bs, const void *vx, size_t bx, const void *vy, size_t by, int nrc) {
+
+    const int K = static_cast<int>(ceil(log2(n) - log2(log2(n)))); // Usually 8
+
     const uint8_t *x = (uint8_t *)vx;
     const int8_t *y = (int8_t *)vy;
 
@@ -51,11 +54,14 @@ void ggml_rsr_vec_dot_i2_i8_s(
     // Load a tile and unpack out the 2x binary vectors
     for (int group = 0; group < group_bnum; group++) {
         const uint8_t *group_start = x + group * BLOCK_SIZE * BLOCK_SIZE;
+        const int8_t *vec_start = y + group * BLOCK_SIZE * BLOCK_SIZE;
 
         // Initialize buffers with 4x cols
         vector<vector<uint8_t>> tile_buffer1(BLOCK_SIZE, vector<uint8_t>(BLOCK_SIZE * 4, 0));
         vector<vector<uint8_t>> tile_buffer2(BLOCK_SIZE, vector<uint8_t>(BLOCK_SIZE * 4, 0));
+        vector<vector<int8_t>> vec_buffer(BLOCK_SIZE, vector<int8_t>(BLOCK_SIZE * 4, 0));
 
+        // Loading the weights, processing them, and loading the vectors
         for (uint8_t i = 0; i < BLOCK_SIZE; i++) {
             for (uint8_t j = 0; j < BLOCK_SIZE; j++) {
                 uint8_t idx_in_tile = i * BLOCK_SIZE + j;
@@ -69,6 +75,7 @@ void ggml_rsr_vec_dot_i2_i8_s(
                 for (int k = 0; k < 128; k++) {
                     tile_buffer1[i][k] = unpacked_bin.a[k];
                     tile_buffer2[i][k] = unpacked_bin.b[k];
+                    vec_buffer[i][k] = vec_start[k];
                 }
             }
         }
@@ -76,9 +83,14 @@ void ggml_rsr_vec_dot_i2_i8_s(
         // Unpack the permutations and segments
         auto [perms_buf1, segs_buf1] = preprocess(tile_buffer1, K);
         auto [perms_buf2, segs_buf2] = preprocess(tile_buffer2, K);
+
+        vector<vector<int8_t>> seg_sum_1 = seg_sum(vec_buffer[0], perms_buf1, segs_buf1, K);
+        vector<vector<int8_t>> bin_k = generateBinaryMatrix(K);
+        auto output = rsr_forward(segs_buf1, bin_k, K);
     }
 
-    std::runtime_error("RSR Leftover group handling not implemented yet.");
+    throw std::runtime_error("RSR Leftover group handling not implemented yet.");
+
     // Process leftover elements that don't form complete 32x32 blocks
     if (groupla_num > 0) {
         const uint8_t *leftover_start = x + group_bnum * BLOCK_SIZE * BLOCK_SIZE;
@@ -110,7 +122,7 @@ void ggml_rsr_vec_dot_i2_i8_s(
 
     }
 
-    std::runtime_error("RSR Matmul not implemented yet!");
+    throw std::runtime_error("RSR Matmul not implemented yet!");
 }
 
 void ggml_bitnet_rsr_mul_mat(struct ggml_tensor *dst, const struct ggml_tensor *src0, const struct ggml_tensor *src1) {
