@@ -161,7 +161,6 @@ seg_sum(vector<int8_t> v, const vector<vector<int8_t>> &perms, const vector<vect
 
 vector<float> rsr_forward(const vector<vector<int8_t>> &seg_sums, const vector<vector<int8_t>> bin_k, int k) {
     vector<float> result = vector<float>(seg_sums.size() * k, 0.f);
-    __builtin_debugtrap();
 
     for (size_t i = 0; i < seg_sums.size(); i++) {
         vector<int8_t> partial_results = vectorMatrixMultiply(seg_sums[i], bin_k);

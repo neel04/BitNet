@@ -40,13 +40,12 @@ const int BLOCK_SIZE = 32;
  */
 void ggml_rsr_vec_dot_i2_i8_s(
     int n, float *s, size_t bs, const void *vx, size_t bx, const void *vy, size_t by, int nrc) {
-
     const int K = static_cast<int>(ceil(log2(n) - log2(log2(n)))); // Usually 8
 
     const uint8_t *x = (uint8_t *)vx;
     const int8_t *y = (int8_t *)vy;
 
-    const int nb = (n * 4) / QK_I2_S;                   // number of blocks
+    const int nb = (n * 4) / QK_I2_S;             // number of blocks
     const int group_bnum = nb / 32;               // number of 32-groups
     const int la_num = nb % 32;                   // number of leftovers
     const int groupla_num = nb % 32 != 0 ? 1 : 0; // 1 or 0 groups to bunch all leftover elems in
@@ -103,7 +102,6 @@ void ggml_rsr_vec_dot_i2_i8_s(
             for (uint8_t j = 0; j < la_num; j++) {
                 uint8_t idx_in_tile = i * la_num + j;
 
-               
                 __builtin_debugtrap();
                 vector<int8_t> unpacked_ternary = unpack_i2_s(leftover_start + idx_in_tile, la_num);
                 VecPair<uint8_t> unpacked_bin = ternary_to_binary(unpacked_ternary, la_num);
@@ -119,36 +117,110 @@ void ggml_rsr_vec_dot_i2_i8_s(
                 auto processed_buffer2 = preprocess(tile_buffer2, K);
             }
         }
-
     }
 
     throw std::runtime_error("RSR Matmul not implemented yet!");
 }
 
-void ggml_bitnet_rsr_mul_mat(struct ggml_tensor *dst, const struct ggml_tensor *src0, const struct ggml_tensor *src1) {
-    print_once("\n== Using RSR Kernel ==\n");
+void ggml_bitnet_rsr_mul_mat(const struct ggml_tensor *src0,
+                             const struct ggml_tensor *src1,
+                             struct ggml_tensor *dst,
+                             const int64_t ir0_start,
+                             const int64_t ir0_end,
+                             const int64_t ir1_start,
+                             const int64_t ir1_end,
+                             const int64_t num_rows_per_vec_dot,
+                             const size_t src1_col_stride,
+                             void *wdata,
+                             ggml_vec_dot_t vec_dot) {
+    print_once("== Using RSR Kernel == ");
+    GGML_TENSOR_BINARY_OP_LOCALS
 
-    // src0: (2560, 2560, 1, 1)
-    // src1: (2560, 2, 1, 1)
-    // dst: (2560, 2, 1, 1)
-    const size_t ne0 = dst->ne[0];
-    const size_t ne1 = dst->ne[1];
+    const enum ggml_type vec_dot_type = GGML_TYPE_I8_S;
+    const bool src1_cont = ggml_is_contiguous(src1);
+    const size_t row_size = ne00 * sizeof(int8_t);
 
-    float *dst_data = (float *)dst->data;
-    for (size_t i = 0; i < ne0 * ne1; i++) {
-        dst_data[i] = 0.0f;
-    }
+    const int64_t blck_0 = 16;
+    const int64_t blck_1 = 16;
+
+    const int64_t r2 = ne12 / ne02;
+    const int64_t r3 = ne13 / ne03;
 
     __builtin_debugtrap();
-    float *src0_data = (float *)src0->data;
-    float *src1_data = (float *)src1->data;
 
-    for (size_t i = 0; i < ne0 * ne1; i++) {
-        auto a = src0_data[i];
-        cout << a << " -> src0 data" << endl;
+    for (int64_t iir1 = ir1_start; iir1 < ir1_end; iir1 += blck_1) {
+        for (int64_t iir0 = ir0_start; iir0 < ir0_end; iir0 += blck_0) {
+            for (int64_t ir1 = iir1; ir1 < iir1 + blck_1 && ir1 < ir1_end; ir1 += num_rows_per_vec_dot) {
+                const int64_t i13 = (ir1 / (ne12 * ne1));
+                const int64_t i12 = (ir1 - i13 * ne12 * ne1) / ne1;
+                const int64_t i11 = (ir1 - i13 * ne12 * ne1 - i12 * ne1);
 
-        auto b = src1_data[i];
-        cout << b << " -> src1 data" << endl;
+                // broadcast src0 into src1
+                const int64_t i03 = i13 / r3;
+                const int64_t i02 = i12 / r2;
+
+                const int64_t i1 = i11;
+                const int64_t i2 = i12;
+                const int64_t i3 = i13;
+
+                const char *src0_row = (const char *)src0->data + (0 + i02 * nb02 + i03 * nb03);
+
+                // desc: when src1 is not a contiguous memory block we have to calculate the offset using the strides
+                //       if it is, then we have either copied the data to params->wdata and made it contiguous or we are
+                //       using the original src1 data pointer, so we should index using the indices directly
+                // TODO: this is a bit of a hack, we should probably have a better way to handle this
+                const char *src1_col =
+                    (const char *)wdata
+                    + (src1_cont || src1->type != vec_dot_type ? (i11 + i12 * ne11 + i13 * ne12 * ne11) * row_size
+                                                               : (i11 * nb11 + i12 * nb12 + i13 * nb13));
+
+                // hack - bitnet hardcoded assuming packing 4x 2-bits into 1x 8-bit
+                const char *src1_col_de = (const char *)wdata + (i11 * nb11 / 4);
+
+                float *dst_col = (float *)((char *)dst->data + (i1 * nb1 + i2 * nb2 + i3 * nb3));
+
+                // for (int64_t ir0 = iir0; ir0 < iir0 + blck_0 && ir0 < ir0_end; ++ir0) {
+                //     vec_dot(ne00, &dst_col[ir0], src0_row + ir0*nb01, src1_col);
+                // }
+
+                float tmp[32];
+
+                const float *scale = (float *)((uint8_t *)(src0->data) + (ne00 * ne01 / 4));
+                const float *act_scales = (const float *)((const char *)wdata + (ne11 * ne10));
+                const int32_t *act_sums = (const int32_t *)((const char *)act_scales + (ne11) * sizeof(float));
+
+                for (int64_t ir0 = iir0; ir0 < iir0 + blck_0 && ir0 < ir0_end; ir0 += num_rows_per_vec_dot) {
+                    if (src0->type == GGML_TYPE_I2_S) {
+                        // vec_dot(ne00,
+                        //         &tmp[ir0 - iir0],
+                        //         (num_rows_per_vec_dot > 1 ? 16 : 0),
+                        //         src0_row + ir0 * nb01 / 4,
+                        //         (num_rows_per_vec_dot > 1 ? nb01 : 0),
+                        //         src1_col_de,
+                        //         (num_rows_per_vec_dot > 1 ? src1_col_stride : 0),
+                        //         num_rows_per_vec_dot);
+                        tmp[ir0 - iir0] = (float) -10.0f;
+                        tmp[ir0 - iir0] = (tmp[ir0 - iir0] - act_sums[i1]) / (act_scales[i1]) * (*scale);
+                    } else {
+                        vec_dot(ne00,
+                                &tmp[ir0 - iir0],
+                                (num_rows_per_vec_dot > 1 ? 16 : 0),
+                                src0_row + ir0 * nb01,
+                                (num_rows_per_vec_dot > 1 ? nb01 : 0),
+                                src1_col,
+                                (num_rows_per_vec_dot > 1 ? src1_col_stride : 0),
+                                num_rows_per_vec_dot);
+                        tmp[ir0 - iir0] = (float) -10.0f;
+                    }
+                }
+
+                for (int cn = 0; cn < num_rows_per_vec_dot; ++cn) {
+                    memcpy(&dst_col[iir0 + cn * nb1 / nb0],
+                           tmp + (cn * 16),
+                           (std::min(iir0 + blck_0, ir0_end) - iir0) * sizeof(float));
+                }
+            }
+        }
     }
 }
 
