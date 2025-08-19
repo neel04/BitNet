@@ -211,6 +211,10 @@ def compile():
         logging.error(f"Arch {arch} is not supported yet")
         exit(0)
     logging.info("Compiling the code using CMake.")
+    
+    # Add LLVM optimization flags to work around the interleaved load combine bug
+    llvm_fix_flags = "-O3 -mllvm -disable-interleaved-load-combine"
+    
     run_command(
         [
             "cmake",
@@ -223,6 +227,8 @@ def compile():
             "-DCMAKE_BUILD_TYPE=Debug",
             "-DCMAKE_C_COMPILER=clang",
             "-DCMAKE_CXX_COMPILER=clang++",
+            f"-DCMAKE_CXX_FLAGS={llvm_fix_flags}",
+            f"-DCMAKE_C_FLAGS={llvm_fix_flags}",
             "-DGGML_METAL=OFF",
             "-DLLAMA_METAL=OFF ",
         ],
