@@ -45,9 +45,11 @@ GGML_API void ggml_bitnet_set_n_threads(int n_threads);
 GGML_API bool ggml_bitnet_rsr_can_mul_mat(const struct ggml_tensor *src0,
                                           const struct ggml_tensor *src1,
                                           const struct ggml_tensor *dst);
+
 GGML_API size_t ggml_bitnet_rsr_mul_mat_get_wsize(const struct ggml_tensor *src0,
                                                   const struct ggml_tensor *src1,
                                                   const struct ggml_tensor *dst);
+
 GGML_API void ggml_bitnet_rsr_mul_mat(const struct ggml_tensor *src0,
                                       const struct ggml_tensor *src1,
                                       struct ggml_tensor *dst,
@@ -56,9 +58,11 @@ GGML_API void ggml_bitnet_rsr_mul_mat(const struct ggml_tensor *src0,
                                       const int64_t ir1_start,
                                       const int64_t ir1_end,
                                       const int64_t num_rows_per_vec_dot,
+                                      const size_t row_size,
                                       const size_t src1_col_stride,
                                       void *wdata,
-                                      ggml_vec_dot_t vec_dot);
+                                      const enum ggml_type vec_dot_type,
+                                      const ggml_vec_dot_t vec_dot);
 
 #if defined(GGML_BITNET_ARM_TL1)
 GGML_API void ggml_qgemm_lut(int m, int k, void *A, void *LUT, void *Scales, void *LUT_Scales, void *C);

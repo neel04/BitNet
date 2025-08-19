@@ -1,14 +1,14 @@
 #include "utils.h"
 
+#include <arm_neon.h>
 #include <stdlib.h>
 
-#include <algorithm>
 #include <cassert>
 #include <cmath>
 #include <cstdint>
 #include <iostream>
 #include <mutex>
-#include <random>
+#include <stdexcept>
 #include <string>
 #include <vector>
 
@@ -30,37 +30,37 @@ void print_once(const std::string &message) {
     call_once(logged_flag, [&message]() { cout << message << endl; });
 }
 
-std::vector<int8_t> unpack_i2_s(const uint8_t *data, size_t num_bytes) {
-    std::vector<int8_t> unpacked_data; // TODO: std::array optimization
+vector<int8_t> unpack_i2_s(const uint8_t *data, size_t num_bytes) {
+    std::vector<int8_t> unpacked_data;
 
-    // Each 32-byte block contains 128 weights (4 weights per byte)
-    // BitNet uses interleaved layout: 4 groups of 32 weights each
-    const size_t block_size = num_bytes;             // 32 bytes per block
-    const size_t weights_per_block = block_size * 4; // 4 * 32 = 128 weights
-    const size_t num_blocks = num_bytes / block_size;
+    const size_t BLOCK_SIZE = 32;
 
-    unpacked_data.reserve(num_blocks * weights_per_block);
+    // Process full blocks
+    const size_t num_full_blocks = num_bytes / BLOCK_SIZE;
+    const size_t remaining_bytes = num_bytes % BLOCK_SIZE;
 
-    for (size_t block = 0; block < num_blocks; ++block) {
-        const uint8_t *block_data = data + block * block_size;
+    unpacked_data.reserve(num_bytes * 4); // 4 weights per byte
+
+    // Process full 32-byte blocks with interleaved layout
+    for (size_t block = 0; block < num_full_blocks; ++block) {
+        const uint8_t *block_data = data + block * BLOCK_SIZE;
 
         // Temporary storage for the 4 interleaved groups
         std::vector<int8_t> group0(32), group1(32), group2(32), group3(32);
 
         // Extract the 4 interleaved groups from the 32-byte block
-        for (size_t i = 0; i < block_size; ++i) {
+        for (size_t i = 0; i < BLOCK_SIZE; ++i) {
             uint8_t packed_byte = block_data[i];
 
-            // BitNet interleaved layout:
+            // BitNet interleaved layout within 128-weight blocks:
             // Bits 7,6 -> group 0 (weights 0-31)
             // Bits 5,4 -> group 1 (weights 32-63)
             // Bits 3,2 -> group 2 (weights 64-95)
             // Bits 1,0 -> group 3 (weights 96-127)
-            // Values 0,1,2 map to -1,0,1 (ternary)
-            group0[i] = ((packed_byte >> 6) & 0x03) - 1;
-            group1[i] = ((packed_byte >> 4) & 0x03) - 1;
-            group2[i] = ((packed_byte >> 2) & 0x03) - 1;
-            group3[i] = ((packed_byte >> 0) & 0x03) - 1;
+            group0[i] = ((packed_byte >> 6) & 0x03);
+            group1[i] = ((packed_byte >> 4) & 0x03);
+            group2[i] = ((packed_byte >> 2) & 0x03);
+            group3[i] = ((packed_byte >> 0) & 0x03);
         }
 
         // Append groups in linear order to create sequential layout
@@ -68,6 +68,24 @@ std::vector<int8_t> unpack_i2_s(const uint8_t *data, size_t num_bytes) {
         unpacked_data.insert(unpacked_data.end(), group1.begin(), group1.end());
         unpacked_data.insert(unpacked_data.end(), group2.begin(), group2.end());
         unpacked_data.insert(unpacked_data.end(), group3.begin(), group3.end());
+    }
+
+    if (remaining_bytes > 0) {
+        // TODO: So this shouldn't happen at all AIUI
+        throw std::runtime_error("Should not happen");
+
+        const uint8_t *remaining_data = data + num_full_blocks * BLOCK_SIZE;
+
+        // For partial blocks, we need to know the expected number of weights
+        // Assuming sequential packing for the remainder (not interleaved)
+        for (size_t i = 0; i < remaining_bytes; ++i) {
+            uint8_t packed_byte = remaining_data[i];
+            // Extract 4 weights per byte, sequentially
+            unpacked_data.push_back((packed_byte >> 6) & 0x03);
+            unpacked_data.push_back((packed_byte >> 4) & 0x03);
+            unpacked_data.push_back((packed_byte >> 2) & 0x03);
+            unpacked_data.push_back((packed_byte >> 0) & 0x03);
+        }
     }
 
     return unpacked_data;
@@ -163,7 +181,7 @@ vector<float> rsr_forward(const vector<vector<int8_t>> &seg_sums, const vector<v
     vector<float> result = vector<float>(seg_sums.size() * k, 0.f);
 
     for (size_t i = 0; i < seg_sums.size(); i++) {
-        vector<int8_t> partial_results = vectorMatrixMultiply(seg_sums[i], bin_k);
+        vector<float> partial_results = vectorMatrixMultiply(seg_sums[i], bin_k);
 
         for (int j = 0; j < k; j++) {
             result[i * k + j] = partial_results[j];
@@ -171,23 +189,6 @@ vector<float> rsr_forward(const vector<vector<int8_t>> &seg_sums, const vector<v
     }
 
     return result;
-}
-
-template <typename T> void matrix_transpose_inplace(std::vector<std::vector<T>> &matrix) {
-    if (matrix.empty() || matrix[0].empty()) {
-        return;
-    }
-
-    const size_t n = matrix.size();
-
-    // Only works for square matrices
-    assert(n == matrix[0].size() && "In-place transpose requires square matrix");
-
-    for (size_t i = 0; i < n; i++) {
-        for (size_t j = i + 1; j < n; j++) {
-            std::swap(matrix[i][j], matrix[j][i]);
-        }
-    }
 }
 
 vector<vector<int8_t>> generateBinaryMatrix(int k) {

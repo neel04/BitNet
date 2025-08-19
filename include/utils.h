@@ -1,6 +1,7 @@
 #ifndef UTILS_H
 #define UTILS_H
 
+#include <arm_neon.h>
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
@@ -66,16 +67,14 @@ template <typename T> VecPair<T> handle_block(std::vector<std::vector<T>> mat_bl
 }
 
 template <typename T>
-std::vector<int8_t> vectorMatrixMultiply(const std::vector<T> &vec, const std::vector<std::vector<T>> &mat) {
-    int n = vec.size();
+std::vector<float> vectorMatrixMultiply(const std::vector<T> &vec, const std::vector<std::vector<T>> &mat) {
+    int rows = mat.size();
+    int cols = mat[0].size();
+    std::vector<float> result(rows, 0);
 
-    // Initialize the result vector with zeros
-    std::vector<int8_t> result(n, 0);
-
-    // Perform vector-matrix multiplication
-    for (int i = 0; i < n; i++) {
-        for (int j = 0; j < n; j++) {
-            result[i] += vec[j] * mat[j][i];
+    for (int i = 0; i < rows; i++) {
+        for (int j = 0; j < cols; j++) {
+            result[i] += vec[j] * mat[i][j];
         }
     }
 
@@ -123,7 +122,22 @@ std::vector<std::vector<int8_t>> seg_sum(std::vector<int8_t> v,
  * @tparam T The data type of matrix elements
  * @param matrix The matrix to transpose in-place (must be square)
  */
-template <typename T> void matrix_transpose_inplace(std::vector<std::vector<T>> &matrix);
+template <typename T> void matrix_transpose_inplace(std::vector<std::vector<T>> &matrix) {
+    if (matrix.empty() || matrix[0].empty()) {
+        return;
+    }
+
+    const size_t n = matrix.size();
+
+    // Only works for square matrices
+    assert(n == matrix[0].size() && "In-place transpose requires square matrix");
+
+    for (size_t i = 0; i < n; i++) {
+        for (size_t j = i + 1; j < n; j++) {
+            std::swap(matrix[i][j], matrix[j][i]);
+        }
+    }
+}
 
 std::vector<std::vector<int8_t>> generateBinaryMatrix(int k);
 

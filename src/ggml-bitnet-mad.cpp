@@ -8,9 +8,9 @@
 #include <type_traits>
 #include <vector>
 
-#include "utils.h"
 #include "ggml-bitnet.h"
 #include "ggml-quants.h"
+#include "utils.h"
 
 #define QK_I2_S 128
 #define QK_I2 128
@@ -49,6 +49,7 @@ static inline int hsum_i32_8(const __m256i a) {
 #endif
 
 size_t quantize_i2_s(const float *src, void *dst, int64_t nrow, int64_t n_per_row, const float *quant_weights) {
+    (void)quant_weights; // Mark parameter as intentionally unused
     // 2 bits per weight
 
     size_t row_size = ggml_row_size(GGML_TYPE_I2_S, n_per_row);
@@ -109,6 +110,10 @@ size_t quantize_i2_s(const float *src, void *dst, int64_t nrow, int64_t n_per_ro
  * @param nrc    The number of row dot products to compute.
  */
 void ggml_vec_dot_i2_i8_s(int n, float *s, size_t bs, const void *vx, size_t bx, const void *vy, size_t by, int nrc) {
+    (void)nrc; // Mark parameter as intentionally unused
+    (void)by;  // Mark parameter as intentionally unused
+    (void)bs;  // Mark parameter as intentionally unused
+    (void)bx;  // Mark parameter as intentionally unused
     print_once("\n === Using BitNet MAD Kernel for vector dot-products! ===\n");
 
     const uint8_t *x = (uint8_t *)vx;
