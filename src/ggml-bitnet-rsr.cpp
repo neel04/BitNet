@@ -43,6 +43,10 @@ void ggml_bitnet_rsr_mul_mat(const struct ggml_tensor *src0,
 
     GGML_TENSOR_BINARY_OP_LOCALS
 
+    // RSR
+    const int K = static_cast<int>(ceil(log2(ne00) - log2(log2(ne00)))); // Usually 8
+    vector<vector<int8_t>> bin_k = generateBinaryMatrix(K);
+    
     // Get scales and sums
     const float *scale = (float *)((uint8_t *)(src0->data) + (ne00 * ne01 / 4));
     const float *act_scales = (const float *)((const char *)wdata + (ne11 * ne10));
@@ -86,9 +90,13 @@ void ggml_bitnet_rsr_mul_mat(const struct ggml_tensor *src0,
                                                                : (i11 * nb11 + i12 * nb12 + i13 * nb13));
 
                 // Number of output rows to compute in this chunk
+                // Should by always equal to `chunk_size` however
                 const int output_rows = std::min(blck_0, (int)(ir0_end - iir0));
 
                 float tmp[32];
+
+                vector<vector<uint8_t>> weight_matrix_bin1(output_rows, vector<uint8_t>(ne00, 0));
+                vector<vector<uint8_t>> weight_matrix_bin2(output_rows, vector<uint8_t>(ne00, 0));
 
                 if (src0->type == GGML_TYPE_I2_S) {
                     vector<vector<int8_t>> weight_matrix(output_rows, vector<int8_t>(ne00, 0));
@@ -105,18 +113,46 @@ void ggml_bitnet_rsr_mul_mat(const struct ggml_tensor *src0,
 
                         vector<int8_t> unpacked_row = unpack_i2_s(packed_row, ne00 / 4);
 
-                        // Copy to weight matrix (only take ne00 weights in case of padding)
+                        // Convert ternary to binary representation
+                        VecPair<uint8_t> unpacked_bin = ternary_to_binary(unpacked_row, ne00);
+
+                        // Copy to weight matrices (only take ne00 weights in case of padding)
                         for (int64_t j = 0; j < ne00 && j < unpacked_row.size(); j++) {
                             weight_matrix[ir0 - iir0][j] = unpacked_row[j];
+                            weight_matrix_bin1[ir0 - iir0][j] = unpacked_bin.a[j];
+                            weight_matrix_bin2[ir0 - iir0][j] = unpacked_bin.b[j];
                         }
                     }
+
+                    // RSR Setup
+                    vector<vector<uint8_t>> weight_matrix_bin1_T(ne00, vector<uint8_t>(output_rows, 0));
+                    vector<vector<uint8_t>> weight_matrix_bin2_T(ne00, vector<uint8_t>(output_rows, 0));
+
+                    // Fill transposed matrices
+                    for (int i = 0; i < output_rows; i++) {
+                        for (int j = 0; j < ne00; j++) {
+                            weight_matrix_bin1_T[j][i] = weight_matrix_bin1[i][j];
+                            weight_matrix_bin2_T[j][i] = weight_matrix_bin2[i][j];
+                        }
+                    }
+
+                    VecPair<vector<int>> preprocessed1 = preprocess(weight_matrix_bin1_T, K);
+                    VecPair<vector<int>> preprocessed2 = preprocess(weight_matrix_bin2_T, K);
+
+                    // RSR forward pass
+                    vector<int> result1 = rsr_inference(acts, preprocessed1.a, preprocessed1.b, bin_k, K, output_rows);
+                    vector<int> result2 = rsr_inference(acts, preprocessed2.a, preprocessed2.b, bin_k, K, output_rows);
 
                     vector<float> output = vectorMatrixMultiply(acts, weight_matrix);
 
                     for (int idx = 0; idx < output_rows; idx++) {
-                        float result = output[idx];
-                        // Transforming {0, 1, 2} ==> {-1, 0, q}
-                        result = (result - act_sums[i1]) / act_scales[i1] * (*scale);
+                        float result_old = output[idx];
+                        float r1 = (float)result1[idx];
+                        float r2 = (float)result2[idx];
+                        // Transforming {0, 1, 2} ==> {-1, 0, 1}
+                        result_old = (result_old - act_sums[i1]) / act_scales[i1] * (*scale);
+                        float result = (r1 - r2) / act_scales[i1] * (*scale);
+                        if (!(result_old == result)) { __builtin_debugtrap(); };
                         tmp[idx] = result;
                     }
                 } else {

@@ -3,6 +3,7 @@
 #include <arm_neon.h>
 #include <stdlib.h>
 
+#include <algorithm>
 #include <cassert>
 #include <cmath>
 #include <cstdint>
@@ -73,19 +74,6 @@ vector<int8_t> unpack_i2_s(const uint8_t *data, size_t num_bytes) {
     if (remaining_bytes > 0) {
         // TODO: So this shouldn't happen at all AIUI
         throw std::runtime_error("Should not happen");
-
-        const uint8_t *remaining_data = data + num_full_blocks * BLOCK_SIZE;
-
-        // For partial blocks, we need to know the expected number of weights
-        // Assuming sequential packing for the remainder (not interleaved)
-        for (size_t i = 0; i < remaining_bytes; ++i) {
-            uint8_t packed_byte = remaining_data[i];
-            // Extract 4 weights per byte, sequentially
-            unpacked_data.push_back((packed_byte >> 6) & 0x03);
-            unpacked_data.push_back((packed_byte >> 4) & 0x03);
-            unpacked_data.push_back((packed_byte >> 2) & 0x03);
-            unpacked_data.push_back((packed_byte >> 0) & 0x03);
-        }
     }
 
     return unpacked_data;
@@ -95,8 +83,8 @@ VecPair<uint8_t> ternary_to_binary(vector<int8_t> ternary, size_t num_bytes) {
     auto bin1 = vector<uint8_t>(num_bytes, 0);
     auto bin2 = vector<uint8_t>(num_bytes, 0);
 
-    for (uint8_t i = 0; i < num_bytes; i++) {
-        int8_t elem = (int8_t)ternary[i];
+    for (size_t i = 0; i < num_bytes; i++) {
+        int8_t elem = (int8_t)ternary[i] - 1; // {0, 1, 2} ==> {-1, 0, 1}
         bin1[i] = !(elem == -1 || elem == 0);
         bin2[i] = !(elem == 0 || elem == 1);
     }
@@ -104,22 +92,23 @@ VecPair<uint8_t> ternary_to_binary(vector<int8_t> ternary, size_t num_bytes) {
     return VecPair<uint8_t>(bin1, bin2);
 }
 
-VecPair<vector<int8_t>> preprocess(vector<vector<uint8_t>> &mat, int k) {
+VecPair<vector<int>> preprocess(vector<vector<uint8_t>> &mat, int k) {
     int n = mat.size();
+    int m = mat[0].size();
 
     // Padding
-    int padding = (k - n % k) % k;
+    int padding = (k - m % k) % k;
     for (auto &row : mat) {
         row.resize(row.size() + padding, 0);
     }
 
-    for (int i = 0; i < padding; i++) {
-        mat.push_back(vector<uint8_t>(n + padding, 0));
-    }
-    n = n + padding;
+    // for (int i = 0; i < padding; i++) {
+    //     mat.push_back(vector<uint8_t>(m + padding, 0));
+    // }
+    m += padding;
 
-    vector<vector<int8_t>> permutations(n / k, vector<int8_t>(n));
-    vector<vector<int8_t>> segs(n / k, vector<int8_t>(pow(2, k)));
+    vector<vector<int>> permutations(n / k, vector<int>(n));
+    vector<vector<int>> segs(n / k, vector<int>(pow(2, k)));
 
     // Splitting into blocks (columnwise) for `handle_block`
     int start;
@@ -127,7 +116,7 @@ VecPair<vector<int8_t>> preprocess(vector<vector<uint8_t>> &mat, int k) {
 
     vector<vector<uint8_t>> block(n, vector<uint8_t>(k));
 
-    for (int i = 0; i < n / k; i++) {
+    for (int i = 0; i < std::min(n, (int)mat[0].size()) / k; i++) {
         // cout << "block " << i + 1 << " out of " << n / k << " blocks" << endl;
         start = i * k;
         end = start + k;
@@ -136,12 +125,12 @@ VecPair<vector<int8_t>> preprocess(vector<vector<uint8_t>> &mat, int k) {
                 block[row][col - start] = mat[row][col];
             }
         }
-        auto per_seg = handle_block(block);
+        VecPair<int> per_seg = handle_block(block);
         permutations[i].assign(per_seg.a.begin(), per_seg.a.end());
         segs[i].assign(per_seg.b.begin(), per_seg.b.end());
     }
 
-    return VecPair<vector<int8_t>>(permutations, segs);
+    return VecPair<vector<int>>(permutations, segs);
 }
 
 vector<vector<int8_t>>
@@ -203,4 +192,74 @@ vector<vector<int8_t>> generateBinaryMatrix(int k) {
     }
 
     return matrix;
+}
+
+
+static vector<float> RSRGemv(const vector<int>& vec, const vector<vector<int8_t>>& mat) {
+    int vec_size = vec.size();        // 256
+    int mat_rows = mat.size();        // 256 
+    int mat_cols = mat[0].size();     // 8
+
+    // Initialize result with matrix columns, not vector size
+    vector<float> result(mat_cols, 0);
+
+    // Perform vector-matrix multiplication: (1x256) * (256x8) = (1x8)
+    for (int i = 0; i < mat_cols; i++) {
+        for (int j = 0; j < mat_rows && j < vec_size; j++) {
+            result[i] += vec[j] * mat[j][i];
+        }
+    }
+
+    return result;
+}
+
+vector<int> rsr_inference(vector<int8_t> v,
+                            const vector<vector<int>> &permutations,
+                            const vector<vector<int>> &segments,
+                            const vector<vector<int8_t>> bin_k,
+                            const int k,
+                            const int output_rows) {
+    int n = permutations[0].size();
+
+    // segmented sums
+    vector<vector<int>> us(permutations.size(), vector<int>(pow(2, k)));
+
+    int start;
+    int end;
+    vector<int> segment;
+    vector<int> permutation;
+
+    for (size_t i = 0; i < permutations.size(); i++) {
+        segment = segments[i];
+        permutation = permutations[i];
+
+        // Each block
+        for (size_t j = 0; j < segment.size(); j++) {
+            start = segment[j];
+            if (j < segment.size() - 1) {
+                end = segment[j + 1];
+            } else {
+                end = n;
+            }
+            // Segmented sum
+            for (int index = start; index < end; index++) {
+                us[i][j] += v[permutation[index]];
+            }           
+        }
+    }
+
+    int roundup = output_rows + (k - output_rows % k) % k;
+
+    // Block product to Bin_k
+    // TODO: change from here for RSR++
+    vector<int> result(roundup); // n
+    vector<float> partial_result; // was: `int`
+
+    for (size_t i = 0; i < std::min((size_t)roundup / k, us.size()); i++) {
+        partial_result = RSRGemv(us[i], bin_k);
+        for (int j = 0; j < k; j++) {
+            result[i * k + j] = partial_result[j];
+        }
+    }
+    return result;
 }

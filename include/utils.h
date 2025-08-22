@@ -20,7 +20,7 @@ template <typename T> struct VecPair {
     }
 };
 
-template <typename T> VecPair<T> handle_block(std::vector<std::vector<T>> mat_block) {
+template <typename T> VecPair<int> handle_block(std::vector<std::vector<T>> mat_block) {
     int n = mat_block.size();
     if (n == 0) {
         return {{}, {}};
@@ -63,11 +63,11 @@ template <typename T> VecPair<T> handle_block(std::vector<std::vector<T>> mat_bl
         last_one = seg[i];
     }
 
-    return {std::vector<T>(permutation.begin(), permutation.end()), std::vector<T>(seg.begin(), seg.end())};
+    return {std::vector<int>(permutation.begin(), permutation.end()), std::vector<int>(seg.begin(), seg.end())};
 }
 
-template <typename T>
-std::vector<float> vectorMatrixMultiply(const std::vector<T> &vec, const std::vector<std::vector<T>> &mat) {
+template <typename T, typename V>
+std::vector<float> vectorMatrixMultiply(const std::vector<V> &vec, const std::vector<std::vector<T>> &mat) {
     int rows = mat.size();
     int cols = mat[0].size();
     std::vector<float> result(rows, 0);
@@ -96,7 +96,7 @@ std::vector<int8_t> unpack_i2_s(const uint8_t *data, size_t num_bytes);
 
 VecPair<uint8_t> ternary_to_binary(std::vector<int8_t> ternary, size_t num_bytes);
 
-VecPair<std::vector<int8_t>> preprocess(std::vector<std::vector<uint8_t>> &mat, int k);
+VecPair<std::vector<int>> preprocess(std::vector<std::vector<uint8_t>> &mat, int k);
 
 /**
  * @brief Performs RSR forward pass: computes dot products and combines results
@@ -110,6 +110,13 @@ VecPair<std::vector<int8_t>> preprocess(std::vector<std::vector<uint8_t>> &mat, 
  */
 std::vector<float>
 rsr_forward(const std::vector<std::vector<int8_t>> &seg_sums, const std::vector<std::vector<int8_t>> bin_k, int k);
+
+std::vector<int> rsr_inference(std::vector<int8_t> v,
+                               const std::vector<std::vector<int>> &permutations,
+                               const std::vector<std::vector<int>> &segments,
+                               const std::vector<std::vector<int8_t>> bin_k,
+                               const int k,
+                               const int output_rows);
 
 std::vector<std::vector<int8_t>> seg_sum(std::vector<int8_t> v,
                                          const std::vector<std::vector<int8_t>> &perms,
