@@ -1,4 +1,6 @@
+#ifdef __ARM_NEON__
 #include <arm_neon.h>
+#endif
 
 #include <cmath>
 #include <cstdlib>

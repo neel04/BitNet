@@ -213,8 +213,8 @@ def compile():
     logging.info("Compiling the code using CMake.")
     
     # Add LLVM optimization flags to work around the interleaved load combine bug
-    llvm_fix_flags = "-O3 -mllvm -disable-interleaved-load-combine"
-    
+    llvm_fix_flags = "-O3 -mllvm -disable-interleaved-load-combine -march=native -mtune=native -funroll-loops -fvectorize -fslp-vectorize"
+
     run_command(
         [
             "cmake",
