@@ -1,5 +1,6 @@
 #include "ggml-bitnet-rsr.h"
 #include <array>
+#include <iostream>
 
 #ifdef __ARM_NEON__
 #include <arm_neon.h>
@@ -36,10 +37,7 @@ constexpr size_t MAX_PERM_SIZE = 8192; // permutation array size
 constexpr size_t MAX_K = 10;           // max k value for bin matrices
 constexpr size_t CHUNK_SIZE = 16;      // chunk size
 
-unordered_map<vector<int8_t>,
-              pair<MatrixArrayPair<int, 8192, 1024>, MatrixArrayPair<int, 8192, 1024>>,
-              VectorHash<int8_t>>
-    cache;
+unordered_map<const void *, pair<MatrixArrayPair<int, MAX_PERM_SIZE, MAX_SEG_SIZE>, MatrixArrayPair<int, MAX_PERM_SIZE, MAX_SEG_SIZE>>> cache;
 mutex cache_mutex;
 
 void ggml_bitnet_rsr_mul_mat(const struct ggml_tensor *src0,
@@ -129,18 +127,34 @@ void ggml_bitnet_rsr_mul_mat(const struct ggml_tensor *src0,
                         acts[i] = src1_col_de[i];
                     }
 
-                    // Try cache first with first row as key
-                    const uint8_t *first_packed_row = src0_row + (iir0 * nb01 / 4);
-                    vector<int8_t> cache_key = unpack_i2_s(first_packed_row, ne00 / 4);
+                    // FIX: ALWAYS unpacking weights - needed for numerics check
+                    for (int64_t ir0 = iir0; ir0 < iir0 + blck_0 && ir0 < ir0_end; ir0++) {
+                        const uint8_t *packed_row = src0_row + (ir0 * nb01 / 4);
+                        vector<int8_t> unpacked_row = unpack_i2_s(packed_row, ne00 / 4);
+
+                        // Convert ternary to binary representation
+                        VecPair<uint8_t> unpacked_bin = ternary_to_binary(unpacked_row, ne00);
+
+                        // Copy to weight matrices - ALWAYS needed
+                        for (int64_t j = 0; j < ne00 && j < unpacked_row.size(); j++) {
+                            weight_matrix[ir0 - iir0][j] = unpacked_row[j];
+                            weight_matrix_bin1[ir0 - iir0][j] = unpacked_bin.a[j];
+                            weight_matrix_bin2[ir0 - iir0][j] = unpacked_bin.b[j];
+                        }
+                    }
+
+                    // Use pointer address as cache key - guaranteed unique for each block
+                    const uint8_t *block_start_addr = src0_row + (iir0 * nb01 / 4);
 
                     MatrixArrayPair<int, MAX_PERM_SIZE, MAX_SEG_SIZE> preprocessed1, preprocessed2;
 
                     bool cache_hit = false;
                     if (enable_cache) {
                         std::lock_guard<std::mutex> lock(cache_mutex);
-                        auto cache_it = cache.find(cache_key);
+                        auto cache_it = cache.find(block_start_addr);
+
                         if (cache_it != cache.end()) {
-                            // Cache hit - use cached preprocessing results
+                            cout << "Cache Hit!\n";
                             preprocessed1 = cache_it->second.first;
                             preprocessed2 = cache_it->second.second;
                             cache_hit = true;
@@ -148,40 +162,23 @@ void ggml_bitnet_rsr_mul_mat(const struct ggml_tensor *src0,
                     }
 
                     if (!cache_hit) {
-                        // Cache miss - unpack weights and preprocess
-                        for (int64_t ir0 = iir0; ir0 < iir0 + blck_0 && ir0 < ir0_end; ir0++) {
-                            const uint8_t *packed_row = src0_row + (ir0 * nb01 / 4);
-                            vector<int8_t> unpacked_row = unpack_i2_s(packed_row, ne00 / 4);
-
-                            // Convert ternary to binary representation
-                            VecPair<uint8_t> unpacked_bin = ternary_to_binary(unpacked_row, ne00);
-
-                            // Copy to weight matrices
-                            for (int64_t j = 0; j < ne00 && j < unpacked_row.size(); j++) {
-                                weight_matrix[ir0 - iir0][j] = unpacked_row[j];
-                                weight_matrix_bin1[ir0 - iir0][j] = unpacked_bin.a[j];
-                                weight_matrix_bin2[ir0 - iir0][j] = unpacked_bin.b[j];
-                            }
-                        }
-
-                        // Transpose matrices for preprocessing
+                        // Only preprocessing needs to be done on cache miss
                         matrix<uint8_t> weight_matrix_bin1_T(ne00, vector<uint8_t>(output_rows, 0));
                         matrix<uint8_t> weight_matrix_bin2_T(ne00, vector<uint8_t>(output_rows, 0));
-
+                        
                         for (int i = 0; i < output_rows; i++) {
                             for (int j = 0; j < ne00; j++) {
                                 weight_matrix_bin1_T[j][i] = weight_matrix_bin1[i][j];
                                 weight_matrix_bin2_T[j][i] = weight_matrix_bin2[i][j];
                             }
                         }
-
-                        // Preprocess and cache results
-                        preprocessed1 = preprocess<MAX_PERM_SIZE, MAX_SEG_SIZE, MAX_K>(weight_matrix_bin1_T, K);
-                        preprocessed2 = preprocess<MAX_PERM_SIZE, MAX_SEG_SIZE, MAX_K>(weight_matrix_bin2_T, K);
-
+                        
+                        preprocessed1 = preprocess<MAX_PERM_SIZE, MAX_SEG_SIZE, MAX_K, MAX_BLOCKS>(weight_matrix_bin1_T, K);
+                        preprocessed2 = preprocess<MAX_PERM_SIZE, MAX_SEG_SIZE, MAX_K, MAX_BLOCKS>(weight_matrix_bin2_T, K);
+                        
                         if (enable_cache) {
                             std::lock_guard<std::mutex> lock(cache_mutex);
-                            cache[cache_key] = {preprocessed1, preprocessed2};
+                            cache[block_start_addr] = {preprocessed1, preprocessed2};
                         }
                     }
 

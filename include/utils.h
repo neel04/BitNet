@@ -203,7 +203,7 @@ std::vector<int8_t> unpack_i2_s(const uint8_t *data, size_t num_bytes);
 
 VecPair<uint8_t> ternary_to_binary(std::vector<int8_t> ternary, size_t num_bytes);
 
-template <size_t MAX_PERM_SIZE, size_t MAX_SEG_SIZE, size_t MAX_K>
+template <size_t MAX_PERM_SIZE, size_t MAX_SEG_SIZE, size_t MAX_K, size_t MAX_BLOCKS>
 MatrixArrayPair<int, MAX_PERM_SIZE, MAX_SEG_SIZE> preprocess(std::vector<std::vector<uint8_t>> &mat, int k) {
     int n = mat.size();
     int m = mat[0].size();
@@ -220,8 +220,8 @@ MatrixArrayPair<int, MAX_PERM_SIZE, MAX_SEG_SIZE> preprocess(std::vector<std::ve
 
     int output_rows = m / k;
 
-    std::vector<std::array<int, MAX_PERM_SIZE>> permutations(n / k);
-    std::vector<std::array<int, MAX_SEG_SIZE>> segs(1 << k);
+    std::vector<std::array<int, MAX_PERM_SIZE>> permutations(output_rows);
+    std::vector<std::array<int, MAX_SEG_SIZE>> segs(output_rows);
 
     // Splitting into blocks (columnwise) for `handle_block`
     int start;
