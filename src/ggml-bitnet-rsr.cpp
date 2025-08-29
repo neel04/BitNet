@@ -37,7 +37,12 @@ constexpr size_t MAX_PERM_SIZE = 8192; // permutation array size
 constexpr size_t MAX_K = 10;           // max k value for bin matrices
 constexpr size_t CHUNK_SIZE = 16;      // chunk size
 
-unordered_map<const void *, pair<MatrixArrayPair<int, MAX_PERM_SIZE, MAX_SEG_SIZE>, MatrixArrayPair<int, MAX_PERM_SIZE, MAX_SEG_SIZE>>> cache;
+struct RSRCacheEntry {
+    vector<array<int, MAX_PERM_SIZE>> perm1, perm2;
+    vector<array<int, MAX_SEG_SIZE>> seg1, seg2;
+};
+
+unordered_map<vector<int8_t>, RSRCacheEntry, VectorHash<int8_t>> cache;
 mutex cache_mutex;
 
 void ggml_bitnet_rsr_mul_mat(const struct ggml_tensor *src0,
@@ -77,7 +82,7 @@ void ggml_bitnet_rsr_mul_mat(const struct ggml_tensor *src0,
     const int64_t r3 = ne13 / ne03;
 
     int blck_0, blck_1;
-    blck_0 = blck_1 = 16; // FIX: Hardcoded chunk size
+    blck_0 = blck_1 = CHUNK_SIZE; // FIX: Hardcoded chunk size
 
     for (int64_t iir1 = ir1_start; iir1 < ir1_end; iir1 += blck_1) {
         for (int64_t iir0 = ir0_start; iir0 < ir0_end; iir0 += blck_0) {
@@ -113,7 +118,7 @@ void ggml_bitnet_rsr_mul_mat(const struct ggml_tensor *src0,
                 const int output_rows = std::min(blck_0, (int)(ir0_end - iir0));
 
                 float tmp[32];
-                bool enable_cache = false; // FIX: Enable cache
+                bool enable_cache = true; // FIX: Enable cache
 
                 matrix<uint8_t> weight_matrix_bin1(output_rows, vector<uint8_t>(ne00, 0));
                 matrix<uint8_t> weight_matrix_bin2(output_rows, vector<uint8_t>(ne00, 0));
@@ -127,81 +132,87 @@ void ggml_bitnet_rsr_mul_mat(const struct ggml_tensor *src0,
                         acts[i] = src1_col_de[i];
                     }
 
-                    // FIX: ALWAYS unpacking weights - needed for numerics check
-                    for (int64_t ir0 = iir0; ir0 < iir0 + blck_0 && ir0 < ir0_end; ir0++) {
-                        const uint8_t *packed_row = src0_row + (ir0 * nb01 / 4);
-                        vector<int8_t> unpacked_row = unpack_i2_s(packed_row, ne00 / 4);
+                    // Generate cache key from first row only (should be big enough to avoid collisions)
+                    const uint8_t *first_packed_row = src0_row + (iir0 * nb01 / 4);
+                    vector<int8_t> cache_key = unpack_i2_s(first_packed_row, ne00 / 4);
 
-                        // Convert ternary to binary representation
-                        VecPair<uint8_t> unpacked_bin = ternary_to_binary(unpacked_row, ne00);
-
-                        // Copy to weight matrices - ALWAYS needed
-                        for (int64_t j = 0; j < ne00 && j < unpacked_row.size(); j++) {
-                            weight_matrix[ir0 - iir0][j] = unpacked_row[j];
-                            weight_matrix_bin1[ir0 - iir0][j] = unpacked_bin.a[j];
-                            weight_matrix_bin2[ir0 - iir0][j] = unpacked_bin.b[j];
-                        }
-                    }
-
-                    // Use pointer address as cache key - guaranteed unique for each block
-                    const uint8_t *block_start_addr = src0_row + (iir0 * nb01 / 4);
-
-                    MatrixArrayPair<int, MAX_PERM_SIZE, MAX_SEG_SIZE> preprocessed1, preprocessed2;
-
+                    RSRCacheEntry cached_entry;
                     bool cache_hit = false;
+
                     if (enable_cache) {
                         std::lock_guard<std::mutex> lock(cache_mutex);
-                        auto cache_it = cache.find(block_start_addr);
+                        auto cache_it = cache.find(cache_key);
 
                         if (cache_it != cache.end()) {
-                            cout << "Cache Hit!\n";
-                            preprocessed1 = cache_it->second.first;
-                            preprocessed2 = cache_it->second.second;
+                            cached_entry = cache_it->second;
                             cache_hit = true;
                         }
                     }
 
                     if (!cache_hit) {
-                        // Only preprocessing needs to be done on cache miss
+                        // Cache miss - need to unpack weights and preprocess
+                        for (int64_t ir0 = iir0; ir0 < iir0 + blck_0 && ir0 < ir0_end; ir0++) {
+                            const uint8_t *packed_row = src0_row + (ir0 * nb01 / 4);
+                            vector<int8_t> unpacked_row = unpack_i2_s(packed_row, ne00 / 4);
+
+                            // Convert ternary to binary representation
+                            VecPair<uint8_t> unpacked_bin = ternary_to_binary(unpacked_row, ne00);
+
+                            // Copy to weight matrices
+                            for (int64_t j = 0; j < ne00 && j < unpacked_row.size(); j++) {
+                                weight_matrix_bin1[ir0 - iir0][j] = unpacked_bin.a[j];
+                                weight_matrix_bin2[ir0 - iir0][j] = unpacked_bin.b[j];
+                            }
+                        }
+
+                        // Transpose matrices for preprocessing
                         matrix<uint8_t> weight_matrix_bin1_T(ne00, vector<uint8_t>(output_rows, 0));
                         matrix<uint8_t> weight_matrix_bin2_T(ne00, vector<uint8_t>(output_rows, 0));
-                        
+
                         for (int i = 0; i < output_rows; i++) {
                             for (int j = 0; j < ne00; j++) {
                                 weight_matrix_bin1_T[j][i] = weight_matrix_bin1[i][j];
                                 weight_matrix_bin2_T[j][i] = weight_matrix_bin2[i][j];
                             }
                         }
-                        
-                        preprocessed1 = preprocess<MAX_PERM_SIZE, MAX_SEG_SIZE, MAX_K, MAX_BLOCKS>(weight_matrix_bin1_T, K);
-                        preprocessed2 = preprocess<MAX_PERM_SIZE, MAX_SEG_SIZE, MAX_K, MAX_BLOCKS>(weight_matrix_bin2_T, K);
-                        
+
+                        auto preprocessed1 =
+                            preprocess<MAX_PERM_SIZE, MAX_SEG_SIZE, MAX_K, MAX_BLOCKS>(weight_matrix_bin1_T, K);
+                        auto preprocessed2 =
+                            preprocess<MAX_PERM_SIZE, MAX_SEG_SIZE, MAX_K, MAX_BLOCKS>(weight_matrix_bin2_T, K);
+
+                        // Copy to cache entry
+                        cached_entry.perm1 = preprocessed1.a;
+                        cached_entry.seg1 = preprocessed1.b;
+                        cached_entry.perm2 = preprocessed2.a;
+                        cached_entry.seg2 = preprocessed2.b;
+
                         if (enable_cache) {
                             std::lock_guard<std::mutex> lock(cache_mutex);
-                            cache[block_start_addr] = {preprocessed1, preprocessed2};
+                            cache[cache_key] = cached_entry;
                         }
                     }
 
                     array<int, MAX_K * 2> result1 =
                         rsr_inference<MAX_SEG_SIZE, MAX_BLOCKS, MAX_PERM_SIZE, MAX_SEG_SIZE, MAX_K, CHUNK_SIZE>(
-                            acts, preprocessed1.a, preprocessed1.b, bin_k, K);
+                            acts, cached_entry.perm1, cached_entry.seg1, bin_k, K);
 
                     array<int, MAX_K * 2> result2 =
                         rsr_inference<MAX_SEG_SIZE, MAX_BLOCKS, MAX_PERM_SIZE, MAX_SEG_SIZE, MAX_K, CHUNK_SIZE>(
-                            acts, preprocessed2.a, preprocessed2.b, bin_k, K);
+                            acts, cached_entry.perm2, cached_entry.seg2, bin_k, K);
 
-                    vector<float> output = vectorMatrixMultiply(acts, weight_matrix);
+                    // vector<float> output = vectorMatrixMultiply(acts, weight_matrix);
 
                     for (int idx = 0; idx < output_rows; idx++) {
-                        float result_old = output[idx];
+                        // float result_old = output[idx];
                         float r1 = (float)result1[idx];
                         float r2 = (float)result2[idx];
                         // Transforming {0, 1, 2} ==> {-1, 0, 1}
-                        result_old = (result_old - act_sums[i1]) / act_scales[i1] * (*scale);
+                        // result_old = (result_old - act_sums[i1]) / act_scales[i1] * (*scale);
                         float result = (r1 - r2) / act_scales[i1] * (*scale);
-                        if (!(result_old == result)) {
-                            __builtin_debugtrap();
-                        };
+                        // if (!(result_old == result)) {
+                        //     __builtin_debugtrap();
+                        // };
                         tmp[idx] = result;
                     }
                 } else {

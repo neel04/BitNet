@@ -5,8 +5,8 @@
 #ifdef __ARM_NEON__
 #include <arm_neon.h>
 #endif
+#include <array>
 #include <chrono>
-#include <cmath>
 #include <cstddef>
 #include <cstdint>
 #include <functional>
@@ -15,7 +15,6 @@
 #include <string>
 #include <utility>
 #include <vector>
-#include <array>
 
 #include "../src/ska_sort.hpp"
 
@@ -54,7 +53,6 @@ template <typename T> struct MatrixPair {
     MatrixPair(const matrix<T> &a, const matrix<T> &b) : a(a), b(b) {
     }
 };
-
 
 class Timer {
   public:
@@ -149,7 +147,7 @@ MatrixArrayPair<int, MAX_PERM_SIZE, MAX_SEG_SIZE> handle_block(std::vector<std::
 
     seg.fill(-1);
     seg[0] = 0;
-    
+
     for (int row = 0; row < n; row++) {
         auto value = packed_data[row].key; // Use already computed packed value
         if (seg[value] == -1) {
@@ -264,9 +262,10 @@ std::vector<float>
 rsr_forward(const std::vector<std::vector<int8_t>> &seg_sums, const std::vector<std::vector<int8_t>> bin_k, int k);
 
 template <size_t MAX_SEGS, size_t MAX_K>
-static std::array<float, MAX_K> RSRGemv(const std::array<int, MAX_SEGS> &vec, const std::vector<std::vector<int8_t>> &mat) {
+static std::array<float, MAX_K> RSRGemv(const std::array<int, MAX_SEGS> &vec,
+                                        const std::vector<std::vector<int8_t>> &mat) {
     int mat_rows = mat.size();    // 256
-    int mat_cols =mat[0].size(); // 8
+    int mat_cols = mat[0].size(); // 8
 
     // Initialize result array
     std::array<float, MAX_K> result{};
