@@ -1,6 +1,7 @@
 #ifndef UTILS_H
 #define UTILS_H
 
+#include <algorithm>
 #include <cassert>
 #ifdef __ARM_NEON__
 #include <arm_neon.h>
@@ -103,7 +104,7 @@ struct PackedItem {
 };
 
 template <typename T, size_t MAX_PERM_SIZE, size_t MAX_SEG_SIZE, size_t MAX_K>
-MatrixArrayPair<int, MAX_PERM_SIZE, MAX_SEG_SIZE> handle_block(std::vector<std::array<T, MAX_K>> mat_block, int k) {
+MatrixArrayPair<int, MAX_PERM_SIZE, MAX_SEG_SIZE> handle_block(const std::vector<std::array<T, MAX_K>> &mat_block, int k) {
     assert(k < 16); // uint16_t being used
 
     int n = mat_block.size();
@@ -186,6 +187,38 @@ std::vector<float> vectorMatrixMultiply(const std::vector<V> &vec, const std::ve
     return result;
 }
 
+// Optimized version that works with pointer to activations and matrix
+template <typename T>
+std::vector<float> vectorMatrixMultiply(const T* vec, const std::vector<std::vector<T>> &mat, int vec_size) {
+    int rows = mat.size();
+    int cols = std::min(vec_size, (int)mat[0].size());
+    std::vector<float> result(rows, 0);
+
+    for (int i = 0; i < rows; i++) {
+        for (int j = 0; j < cols; j++) {
+            result[i] += vec[j] * mat[i][j];
+        }
+    }
+
+    return result;
+}
+
+// Overload for vector<array> matrices
+template <typename T, size_t N>
+std::vector<float> vectorMatrixMultiply(const std::vector<T> &vec, const std::vector<std::array<T, N>> &mat) {
+    int rows = mat.size();
+    int cols = std::min((int)vec.size(), (int)N);
+    std::vector<float> result(rows, 0);
+
+    for (int i = 0; i < rows; i++) {
+        for (int j = 0; j < cols; j++) {
+            result[i] += vec[j] * mat[i][j];
+        }
+    }
+
+    return result;
+}
+
 /**
  * @brief Unpacks a block of 2-bit quantized data into a vector of ternary values.
  *
@@ -199,7 +232,7 @@ std::vector<float> vectorMatrixMultiply(const std::vector<V> &vec, const std::ve
  */
 std::vector<int8_t> unpack_i2_s(const uint8_t *data, size_t num_bytes);
 
-VecPair<uint8_t> ternary_to_binary(std::vector<int8_t> ternary, size_t num_bytes);
+VecPair<uint8_t> ternary_to_binary(const std::vector<int8_t> &ternary, size_t num_bytes);
 
 template <size_t MAX_PERM_SIZE, size_t MAX_SEG_SIZE, size_t MAX_K, size_t MAX_BLOCKS>
 MatrixArrayPair<int, MAX_PERM_SIZE, MAX_SEG_SIZE> preprocess(std::vector<std::vector<uint8_t>> &mat, int k) {
@@ -259,13 +292,13 @@ MatrixArrayPair<int, MAX_PERM_SIZE, MAX_SEG_SIZE> preprocess(std::vector<std::ve
  * @return Vector of float results (one per output row)
  */
 std::vector<float>
-rsr_forward(const std::vector<std::vector<int8_t>> &seg_sums, const std::vector<std::vector<int8_t>> bin_k, int k);
+rsr_forward(const std::vector<std::vector<int8_t>> &seg_sums, const std::vector<std::array<int8_t, 16>> &bin_k, int k);
 
 template <size_t MAX_SEGS, size_t MAX_K>
 static std::array<float, MAX_K> RSRGemv(const std::array<int, MAX_SEGS> &vec,
-                                        const std::vector<std::vector<int8_t>> &mat) {
+                                        const std::vector<std::array<int8_t, 16>> &mat) {
     int mat_rows = mat.size();    // 256
-    int mat_cols = mat[0].size(); // 8
+    int mat_cols = 16; // Fixed size from array
 
     // Initialize result array
     std::array<float, MAX_K> result{};
@@ -281,13 +314,13 @@ static std::array<float, MAX_K> RSRGemv(const std::array<int, MAX_SEGS> &vec,
 }
 
 template <size_t MAX_SEGS, size_t MAX_BLKS, size_t MAX_PERM, size_t MAX_SEG_SIZE, size_t MAX_K, size_t CHUNK_SIZE>
-std::array<int, MAX_K * 2> rsr_inference(std::vector<int8_t> v,
+std::array<int, MAX_K * 2> rsr_inference(const int8_t* v, int v_size,
                                          const std::vector<std::array<int, MAX_PERM>> &permutations,
                                          const std::vector<std::array<int, MAX_SEG_SIZE>> &segments,
-                                         const std::vector<std::vector<int8_t>> bin_k,
+                                         const std::vector<std::array<int8_t, 16>> &bin_k,
                                          const int k) {
     int roundup = CHUNK_SIZE + (k - CHUNK_SIZE % k) % k;
-    int n = v.size();
+    int n = v_size;
 
     assert((roundup / k) < MAX_BLKS); // warn to increase bound if needed
 
@@ -336,12 +369,12 @@ std::array<int, MAX_K * 2> rsr_inference(std::vector<int8_t> v,
     return result;
 }
 
-std::vector<std::vector<int8_t>> seg_sum(std::vector<int8_t> v,
+std::vector<std::vector<int8_t>> seg_sum(const std::vector<int8_t> &v,
                                          const std::vector<std::vector<int8_t>> &perms,
                                          const std::vector<std::vector<int8_t>> &segs,
                                          int8_t k);
 
-std::vector<std::vector<int8_t>> generateBinaryMatrix(int k);
+std::vector<std::array<int8_t, 16>> generateBinaryMatrix(int k);
 
 /**
  * @brief Transposes a 2D matrix in-place.

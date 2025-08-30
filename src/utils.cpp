@@ -1,5 +1,6 @@
 #include "utils.h"
 #include <cstdio>
+#include <cstring>
 
 #ifdef __ARM_NEON__
 #include <arm_neon.h>
@@ -23,54 +24,55 @@ void print_once(const std::string &message) {
 }
 
 vector<int8_t> unpack_i2_s(const uint8_t *data, size_t num_bytes) {
-    std::vector<int8_t> unpacked_data;
-
     const size_t BLOCK_SIZE = 32;
-
-    // Process full blocks
     const size_t num_full_blocks = num_bytes / BLOCK_SIZE;
     const size_t remaining_bytes = num_bytes % BLOCK_SIZE;
 
-    unpacked_data.reserve(num_bytes * 4); // 4 weights per byte
+    if (remaining_bytes > 0) {
+        throw std::runtime_error("Should not happen");
+    }
+
+    // Pre-allocate with exact size - no reallocation needed
+    std::vector<int8_t> unpacked_data(num_bytes * 4);
+    int8_t *output_ptr = unpacked_data.data();
 
     // Process full 32-byte blocks with interleaved layout
     for (size_t block = 0; block < num_full_blocks; ++block) {
         const uint8_t *block_data = data + block * BLOCK_SIZE;
+        int8_t *block_output = output_ptr + block * 128; // 128 = BLOCK_SIZE * 4
 
-        // Temporary storage for the 4 interleaved groups
-        std::vector<int8_t> group0(32), group1(32), group2(32), group3(32);
+        // Extract and write directly to output for maximum cache efficiency
+        // Process 4 bytes at a time for better instruction-level parallelism
+        for (size_t i = 0; i < BLOCK_SIZE; i += 4) {
+            // Prefetch next cache line
+            if (i + 8 < BLOCK_SIZE) {
+                __builtin_prefetch(block_data + i + 8, 0, 3);
+            }
 
-        // Extract the 4 interleaved groups from the 32-byte block
-        for (size_t i = 0; i < BLOCK_SIZE; ++i) {
-            uint8_t packed_byte = block_data[i];
+            // Process 4 bytes in parallel
+            uint32_t four_bytes = *reinterpret_cast<const uint32_t *>(block_data + i);
 
-            // BitNet interleaved layout within 128-weight blocks:
-            // Bits 7,6 -> group 0 (weights 0-31)
-            // Bits 5,4 -> group 1 (weights 32-63)
-            // Bits 3,2 -> group 2 (weights 64-95)
-            // Bits 1,0 -> group 3 (weights 96-127)
-            group0[i] = ((packed_byte >> 6) & 0x03);
-            group1[i] = ((packed_byte >> 4) & 0x03);
-            group2[i] = ((packed_byte >> 2) & 0x03);
-            group3[i] = ((packed_byte >> 0) & 0x03);
+            // Extract all 16 values (4 bytes * 4 groups) in one loop
+            for (size_t j = 0; j < 4; ++j) {
+                uint8_t packed_byte = (four_bytes >> (j * 8)) & 0xFF;
+
+                // BitNet interleaved layout within 128-weight blocks:
+                // Bits 7,6 -> group 0 (weights 0-31)
+                // Bits 5,4 -> group 1 (weights 32-63)
+                // Bits 3,2 -> group 2 (weights 64-95)
+                // Bits 1,0 -> group 3 (weights 96-127)
+                block_output[i + j] = ((packed_byte >> 6) & 0x03);
+                block_output[i + j + 32] = ((packed_byte >> 4) & 0x03);
+                block_output[i + j + 64] = ((packed_byte >> 2) & 0x03);
+                block_output[i + j + 96] = ((packed_byte >> 0) & 0x03);
+            }
         }
-
-        // Append groups in linear order to create sequential layout
-        unpacked_data.insert(unpacked_data.end(), group0.begin(), group0.end());
-        unpacked_data.insert(unpacked_data.end(), group1.begin(), group1.end());
-        unpacked_data.insert(unpacked_data.end(), group2.begin(), group2.end());
-        unpacked_data.insert(unpacked_data.end(), group3.begin(), group3.end());
-    }
-
-    if (remaining_bytes > 0) {
-        // TODO: So this shouldn't happen at all AIUI
-        throw std::runtime_error("Should not happen");
     }
 
     return unpacked_data;
 }
 
-VecPair<uint8_t> ternary_to_binary(vector<int8_t> ternary, size_t num_bytes) {
+VecPair<uint8_t> ternary_to_binary(const vector<int8_t> &ternary, size_t num_bytes) {
     auto bin1 = vector<uint8_t>(num_bytes, 0);
     auto bin2 = vector<uint8_t>(num_bytes, 0);
 
@@ -84,7 +86,7 @@ VecPair<uint8_t> ternary_to_binary(vector<int8_t> ternary, size_t num_bytes) {
 }
 
 vector<vector<int8_t>>
-seg_sum(vector<int8_t> v, const vector<vector<int8_t>> &perms, const vector<vector<int8_t>> &segs, int8_t k) {
+seg_sum(const vector<int8_t> &v, const vector<vector<int8_t>> &perms, const vector<vector<int8_t>> &segs, int8_t k) {
     int8_t n = perms[0].size();
 
     // Segmented Sums
@@ -116,7 +118,7 @@ seg_sum(vector<int8_t> v, const vector<vector<int8_t>> &perms, const vector<vect
     return us;
 }
 
-vector<float> rsr_forward(const vector<vector<int8_t>> &seg_sums, const vector<vector<int8_t>> bin_k, int k) {
+vector<float> rsr_forward(const vector<vector<int8_t>> &seg_sums, const vector<array<int8_t, 16>> &bin_k, int k) {
     vector<float> result = vector<float>(seg_sums.size() * k, 0.f);
 
     for (size_t i = 0; i < seg_sums.size(); i++) {
@@ -130,11 +132,12 @@ vector<float> rsr_forward(const vector<vector<int8_t>> &seg_sums, const vector<v
     return result;
 }
 
-vector<vector<int8_t>> generateBinaryMatrix(int k) {
+vector<array<int8_t, 16>> generateBinaryMatrix(int k) {
     int rows = pow(2, k);                                      // 2^k rows
-    vector<vector<int8_t>> matrix(rows, vector<int8_t>(k, 0)); // Initialize matrix with 0s
+    vector<array<int8_t, 16>> matrix(rows); // Initialize matrix
 
     for (int i = 0; i < rows; ++i) {
+        matrix[i].fill(0); // Initialize with zeros
         for (int j = 0; j < k; ++j) {
             // Generate the binary value for each position
             matrix[i][k - j - 1] = (i >> j) & 1; // Extract the j-th bit from i

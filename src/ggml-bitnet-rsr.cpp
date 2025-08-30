@@ -17,6 +17,7 @@
 #include <cstdint>
 #include <cstdio>
 #include <mutex>
+#include <shared_mutex>
 #include <unordered_map>
 #include <utility>
 #include <vector>
@@ -43,7 +44,7 @@ struct RSRCacheEntry {
 };
 
 unordered_map<vector<int8_t>, RSRCacheEntry, VectorHash<int8_t>> cache;
-mutex cache_mutex;
+shared_mutex cache_mutex;
 
 void ggml_bitnet_rsr_mul_mat(const struct ggml_tensor *src0,
                              const struct ggml_tensor *src1,
@@ -69,7 +70,7 @@ void ggml_bitnet_rsr_mul_mat(const struct ggml_tensor *src0,
 
     // RSR
     const int K = static_cast<int>(ceil(log2(ne00) - log2(log2(ne00)))); // Usually 8
-    vector<vector<int8_t>> bin_k = generateBinaryMatrix(K);
+    vector<array<int8_t, 16>> bin_k = generateBinaryMatrix(K);
 
     // Get scales and sums
     const float *scale = (float *)((uint8_t *)(src0->data) + (ne00 * ne01 / 4));
@@ -116,6 +117,7 @@ void ggml_bitnet_rsr_mul_mat(const struct ggml_tensor *src0,
                 // Number of output rows to compute in this chunk
                 // Should by always equal to `chunk_size` however
                 const int output_rows = std::min(blck_0, (int)(ir0_end - iir0));
+                assert(output_rows <= (int)CHUNK_SIZE);
 
                 float tmp[32];
                 bool enable_cache = true; // FIX: Enable cache
@@ -124,23 +126,18 @@ void ggml_bitnet_rsr_mul_mat(const struct ggml_tensor *src0,
                 matrix<uint8_t> weight_matrix_bin2(output_rows, vector<uint8_t>(ne00, 0));
 
                 if (src0->type == GGML_TYPE_I2_S) {
-                    vector<vector<int8_t>> weight_matrix(output_rows, vector<int8_t>(ne00, 0));
-                    vector<int8_t> acts(ne00, 0);
-
-                    // Load activations
-                    for (int64_t i = 0; i < ne00; ++i) {
-                        acts[i] = src1_col_de[i];
-                    }
-
+                    // vector<vector<int8_t>> weight_matrix(output_rows, vector<int8_t>(ne00, 0));
+                    
                     // Generate cache key from first row only (should be big enough to avoid collisions)
                     const uint8_t *first_packed_row = src0_row + (iir0 * nb01 / 4);
                     vector<int8_t> cache_key = unpack_i2_s(first_packed_row, ne00 / 4);
 
-                    RSRCacheEntry cached_entry;
                     bool cache_hit = false;
+                    RSRCacheEntry cached_entry;
 
                     if (enable_cache) {
-                        std::lock_guard<std::mutex> lock(cache_mutex);
+                        std::shared_lock<std::shared_mutex> read_lock(cache_mutex);
+
                         auto cache_it = cache.find(cache_key);
 
                         if (cache_it != cache.end()) {
@@ -188,18 +185,18 @@ void ggml_bitnet_rsr_mul_mat(const struct ggml_tensor *src0,
                         cached_entry.seg2 = preprocessed2.b;
 
                         if (enable_cache) {
-                            std::lock_guard<std::mutex> lock(cache_mutex);
+                            std::unique_lock<std::shared_mutex> write_lock(cache_mutex);
                             cache[cache_key] = cached_entry;
                         }
                     }
 
                     array<int, MAX_K * 2> result1 =
                         rsr_inference<MAX_SEG_SIZE, MAX_BLOCKS, MAX_PERM_SIZE, MAX_SEG_SIZE, MAX_K, CHUNK_SIZE>(
-                            acts, cached_entry.perm1, cached_entry.seg1, bin_k, K);
+                            src1_col_de, ne00, cached_entry.perm1, cached_entry.seg1, bin_k, K);
 
                     array<int, MAX_K * 2> result2 =
                         rsr_inference<MAX_SEG_SIZE, MAX_BLOCKS, MAX_PERM_SIZE, MAX_SEG_SIZE, MAX_K, CHUNK_SIZE>(
-                            acts, cached_entry.perm2, cached_entry.seg2, bin_k, K);
+                            src1_col_de, ne00, cached_entry.perm2, cached_entry.seg2, bin_k, K);
 
                     // vector<float> output = vectorMatrixMultiply(acts, weight_matrix);
 
