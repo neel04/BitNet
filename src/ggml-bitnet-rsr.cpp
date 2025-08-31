@@ -196,23 +196,25 @@ void ggml_bitnet_rsr_mul_mat(const struct ggml_tensor *src0,
                         }
                     }
 
-                    array<int, MAX_K * 2> result1 =
-                        rsr_inference<MAX_SEG_SIZE, MAX_BLOCKS, MAX_PERM_SIZE, MAX_SEG_SIZE, MAX_K, CHUNK_SIZE>(
-                            src1_col_de, ne00, cached_entry->perm1, cached_entry->seg1, bin_k, K);
-
-                    array<int, MAX_K * 2> result2 =
-                        rsr_inference<MAX_SEG_SIZE, MAX_BLOCKS, MAX_PERM_SIZE, MAX_SEG_SIZE, MAX_K, CHUNK_SIZE>(
-                            src1_col_de, ne00, cached_entry->perm2, cached_entry->seg2, bin_k, K);
+                    array<int, MAX_K * 2> fused_result =
+                        rsr_inference_fused<MAX_SEG_SIZE, MAX_BLOCKS, MAX_PERM_SIZE, MAX_SEG_SIZE, MAX_K, CHUNK_SIZE>(
+                            src1_col_de,
+                            ne00,
+                            cached_entry->perm1,
+                            cached_entry->seg1,
+                            cached_entry->perm2,
+                            cached_entry->seg2,
+                            bin_k,
+                            K);
 
                     // vector<float> output = vectorMatrixMultiply(acts, weight_matrix);
 
                     for (int idx = 0; idx < output_rows; idx++) {
                         // float result_old = output[idx];
-                        float r1 = (float)result1[idx];
-                        float r2 = (float)result2[idx];
+                        float fused_r = (float)fused_result[idx];
                         // Transforming {0, 1, 2} ==> {-1, 0, 1}
                         // result_old = (result_old - act_sums[i1]) / act_scales[i1] * (*scale);
-                        float result = (r1 - r2) / act_scales[i1] * (*scale);
+                        float result = fused_r / act_scales[i1] * (*scale);
                         // if (!(result_old == result)) {
                         //     __builtin_debugtrap();
                         // };
