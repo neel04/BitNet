@@ -324,17 +324,18 @@ std::array<int, MAX_K * 2> rsr_inference(const int8_t* v, int v_size,
 
     assert((roundup / k) < MAX_BLKS); // warn to increase bound if needed
 
-    thread_local std::array<std::array<int, MAX_SEGS>, MAX_BLKS> us = std::array<std::array<int, MAX_SEGS>, MAX_BLKS>();
+    static thread_local std::array<std::array<int, MAX_SEGS>, MAX_BLKS> us = std::array<std::array<int, MAX_SEGS>, MAX_BLKS>();
 
     const int seg_size = 1 << k;
     std::array<int, MAX_PERM + 1> pref{};
+    std::array<int, MAX_K * 2> result;
 
     for (int i = 0; i < (roundup / k); i++) {
+        std::array<float, MAX_K> partial_result{}; // Changed to array
         const std::array<int, MAX_SEG_SIZE> &segment = segments[i];
         const std::array<int, MAX_PERM> &permutation = permutations[i];
         pref[0] = 0;
 
-        // OPTIMIZE: < n && < seg_size
         for (int t = 0; t < n; ++t) {
             pref[t + 1] = pref[t] + static_cast<int>(v[permutation[t]]);
         }
@@ -351,14 +352,7 @@ std::array<int, MAX_K * 2> rsr_inference(const int8_t* v, int v_size,
 
             us[i][j] = pref[end] - pref[start];
         }
-    }
 
-    // Block product to Bin_k
-    // TODO: change from here for RSR++
-    std::array<int, MAX_K * 2> result;
-    std::array<float, MAX_K> partial_result{}; // Changed to array
-
-    for (size_t i = 0; i < std::min((size_t)roundup / k, permutations.size()) && i < MAX_BLKS; i++) {
         partial_result = RSRGemv<MAX_SEGS, MAX_K>(us[i], bin_k);
 
         for (int j = 0; j < k; j++) {

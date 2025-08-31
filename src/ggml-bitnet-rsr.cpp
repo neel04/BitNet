@@ -33,7 +33,7 @@ using namespace std;
 template <typename T> using matrix = vector<vector<T>>;
 
 constexpr size_t MAX_SEG_SIZE = 1024;  // pow(2, k) max, typically k=8-10
-constexpr size_t MAX_BLOCKS = 8;       // permutations.size() max
+constexpr size_t MAX_BLOCKS = 4;       // permutations.size() max
 constexpr size_t MAX_PERM_SIZE = 8192; // permutation array size
 constexpr size_t MAX_K = 10;           // max k value for bin matrices
 constexpr size_t CHUNK_SIZE = 16;      // chunk size
@@ -122,18 +122,14 @@ void ggml_bitnet_rsr_mul_mat(const struct ggml_tensor *src0,
                 float tmp[32];
                 bool enable_cache = true; // FIX: Enable cache
 
-                matrix<uint8_t> weight_matrix_bin1(output_rows, vector<uint8_t>(ne00, 0));
-                matrix<uint8_t> weight_matrix_bin2(output_rows, vector<uint8_t>(ne00, 0));
-
                 if (src0->type == GGML_TYPE_I2_S) {
                     // vector<vector<int8_t>> weight_matrix(output_rows, vector<int8_t>(ne00, 0));
-                    
                     // Generate cache key from first row only (should be big enough to avoid collisions)
                     const uint8_t *first_packed_row = src0_row + (iir0 * nb01 / 4);
                     vector<int8_t> cache_key = unpack_i2_s(first_packed_row, ne00 / 4);
 
                     bool cache_hit = false;
-                    RSRCacheEntry cached_entry;
+                    const RSRCacheEntry* cached_entry = nullptr;
 
                     if (enable_cache) {
                         std::shared_lock<std::shared_mutex> read_lock(cache_mutex);
@@ -141,13 +137,20 @@ void ggml_bitnet_rsr_mul_mat(const struct ggml_tensor *src0,
                         auto cache_it = cache.find(cache_key);
 
                         if (cache_it != cache.end()) {
-                            cached_entry = cache_it->second;
+                            cached_entry = &(cache_it->second);
                             cache_hit = true;
                         }
                     }
 
+                    RSRCacheEntry local_cache_entry;  // Local entry for cache miss case
+                    
                     if (!cache_hit) {
+                        cout << "Cache Miss - Warmup\n";
+
                         // Cache miss - need to unpack weights and preprocess
+                        matrix<uint8_t> weight_matrix_bin1(output_rows, vector<uint8_t>(ne00, 0));
+                        matrix<uint8_t> weight_matrix_bin2(output_rows, vector<uint8_t>(ne00, 0));
+
                         for (int64_t ir0 = iir0; ir0 < iir0 + blck_0 && ir0 < ir0_end; ir0++) {
                             const uint8_t *packed_row = src0_row + (ir0 * nb01 / 4);
                             vector<int8_t> unpacked_row = unpack_i2_s(packed_row, ne00 / 4);
@@ -178,25 +181,28 @@ void ggml_bitnet_rsr_mul_mat(const struct ggml_tensor *src0,
                         auto preprocessed2 =
                             preprocess<MAX_PERM_SIZE, MAX_SEG_SIZE, MAX_K, MAX_BLOCKS>(weight_matrix_bin2_T, K);
 
-                        // Copy to cache entry
-                        cached_entry.perm1 = preprocessed1.a;
-                        cached_entry.seg1 = preprocessed1.b;
-                        cached_entry.perm2 = preprocessed2.a;
-                        cached_entry.seg2 = preprocessed2.b;
+                        // Copy to local cache entry
+                        local_cache_entry.perm1 = preprocessed1.a;
+                        local_cache_entry.seg1 = preprocessed1.b;
+                        local_cache_entry.perm2 = preprocessed2.a;
+                        local_cache_entry.seg2 = preprocessed2.b;
+
+                        // Point to the local entry
+                        cached_entry = &local_cache_entry;
 
                         if (enable_cache) {
                             std::unique_lock<std::shared_mutex> write_lock(cache_mutex);
-                            cache[cache_key] = cached_entry;
+                            cache[cache_key] = local_cache_entry;
                         }
                     }
 
                     array<int, MAX_K * 2> result1 =
                         rsr_inference<MAX_SEG_SIZE, MAX_BLOCKS, MAX_PERM_SIZE, MAX_SEG_SIZE, MAX_K, CHUNK_SIZE>(
-                            src1_col_de, ne00, cached_entry.perm1, cached_entry.seg1, bin_k, K);
+                            src1_col_de, ne00, cached_entry->perm1, cached_entry->seg1, bin_k, K);
 
                     array<int, MAX_K * 2> result2 =
                         rsr_inference<MAX_SEG_SIZE, MAX_BLOCKS, MAX_PERM_SIZE, MAX_SEG_SIZE, MAX_K, CHUNK_SIZE>(
-                            src1_col_de, ne00, cached_entry.perm2, cached_entry.seg2, bin_k, K);
+                            src1_col_de, ne00, cached_entry->perm2, cached_entry->seg2, bin_k, K);
 
                     // vector<float> output = vectorMatrixMultiply(acts, weight_matrix);
 
