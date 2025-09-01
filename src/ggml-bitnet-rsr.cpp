@@ -145,8 +145,6 @@ void ggml_bitnet_rsr_mul_mat(const struct ggml_tensor *src0,
                     RSRCacheEntry local_cache_entry;  // Local entry for cache miss case
                     
                     if (!cache_hit) {
-                        cout << "Cache Miss - Warmup\n";
-
                         // Cache miss - need to unpack weights and preprocess
                         matrix<uint8_t> weight_matrix_bin1(output_rows, vector<uint8_t>(ne00, 0));
                         matrix<uint8_t> weight_matrix_bin2(output_rows, vector<uint8_t>(ne00, 0));

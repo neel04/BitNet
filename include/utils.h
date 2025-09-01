@@ -223,6 +223,16 @@ std::vector<float> vectorMatrixMultiply(const std::vector<T> &vec, const std::ve
 }
 
 /**
+ * @brief Compute inverse permutation
+ */
+template <size_t MAX_PERM>
+inline void compute_inverse_perm(std::array<int, MAX_PERM> &inv_perm, const std::array<int, MAX_PERM> &perm, int n) {
+    for (int i = 0; i < n; i++) {
+        inv_perm[perm[i]] = i;
+    }
+}
+
+/**
  * @brief Unpacks a block of 2-bit quantized data into a vector of ternary values.
  *
  * Each byte in the input data contains four 2-bit values. This function extracts
@@ -254,7 +264,7 @@ MatrixArrayPair<int, MAX_PERM_SIZE, MAX_SEG_SIZE> preprocess(std::vector<std::ve
 
     int output_rows = m / k;
 
-    std::vector<std::array<int, MAX_PERM_SIZE>> permutations(output_rows);
+    std::vector<std::array<int, MAX_PERM_SIZE>> inv_permutations(output_rows);
     std::vector<std::array<int, MAX_SEG_SIZE>> segs(output_rows);
 
     // Splitting into blocks (columnwise) for `handle_block`
@@ -276,12 +286,12 @@ MatrixArrayPair<int, MAX_PERM_SIZE, MAX_SEG_SIZE> preprocess(std::vector<std::ve
         MatrixArrayPair<int, MAX_PERM_SIZE, MAX_SEG_SIZE> per_seg =
             handle_block<uint8_t, MAX_PERM_SIZE, MAX_SEG_SIZE, MAX_K>(block, k);
 
-        // Copy arrays directly
-        permutations[i] = per_seg.a[0];
+        // Compute inverse permutation directly and store it
+        compute_inverse_perm<MAX_PERM_SIZE>(inv_permutations[i], per_seg.a[0], n);
         segs[i] = per_seg.b[0];
     }
 
-    return MatrixArrayPair<int, MAX_PERM_SIZE, MAX_SEG_SIZE>(permutations, segs);
+    return MatrixArrayPair<int, MAX_PERM_SIZE, MAX_SEG_SIZE>(inv_permutations, segs);
 }
 
 /**
@@ -379,6 +389,163 @@ inline void prefix_sum_vec_avx2(int32_t* p) {
 }
 #endif
 #endif
+
+/**
+ * @brief Optimized (dual) prefix sum using SIMD and inverse permutations
+ * Scatters input directly to final positions for better cache locality
+ */
+template <size_t MAX_PERM>
+inline void simd_dual_prefix_sum_inverse(std::array<int, MAX_PERM + 1> &output1,
+                                         std::array<int, MAX_PERM + 1> &output2,
+                                         const int8_t *input,
+                                         const std::array<int, MAX_PERM> &inv_perm1,
+                                         const std::array<int, MAX_PERM> &inv_perm2,
+                                         int n) {
+    output1[0] = 0;
+    output2[0] = 0;
+
+    // Scatter input directly using inverse permutations
+    alignas(32) int32_t temp1[MAX_PERM];
+    alignas(32) int32_t temp2[MAX_PERM];
+
+    // Initialize to zero
+    for (int i = 0; i < n; i++) {
+        temp1[i] = 0;
+        temp2[i] = 0;
+    }
+
+    // Scatter input values to their final positions
+    for (int i = 0; i < n; i++) {
+        temp1[inv_perm1[i]] = static_cast<int32_t>(input[i]);
+    }
+    for (int i = 0; i < n; i++) {
+        temp2[inv_perm2[i]] = static_cast<int32_t>(input[i]);
+    }
+
+#ifdef __ARM_NEON__
+    int i = 0;
+
+    // Phase 1: Local prefix sums for both arrays
+    for (; i + 3 < n; i += 4) {
+        int32x4_t x1 = vld1q_s32(&temp1[i]);
+        int32x4_t x2 = vld1q_s32(&temp2[i]);
+
+        x1 = prefix_sum_vec_neon(x1);
+        x2 = prefix_sum_vec_neon(x2);
+
+        vst1q_s32(&temp1[i], x1);
+        vst1q_s32(&temp2[i], x2);
+    }
+
+    // Handle remainder
+    for (int j = i; j < n; j++) {
+        if (j > 0) {
+            temp1[j] += temp1[j - 1];
+            temp2[j] += temp2[j - 1];
+        }
+    }
+
+    // Phase 2: Accumulate across blocks for both arrays
+    if (n > 4) {
+        int32x4_t carry1 = vdupq_n_s32(temp1[3]);
+        int32x4_t carry2 = vdupq_n_s32(temp2[3]);
+
+        for (int j = 4; j + 3 < n; j += 4) {
+            // Process both arrays to maximize cache reuse
+            carry1 = accumulate_neon(&temp1[j], carry1);
+            carry2 = accumulate_neon(&temp2[j], carry2);
+        }
+
+        // Handle final elements
+        int last_carry1 = vgetq_lane_s32(carry1, 0);
+        int last_carry2 = vgetq_lane_s32(carry2, 0);
+        for (int j = (n / 4) * 4; j < n && j >= 4; j++) {
+            temp1[j] += last_carry1;
+            temp2[j] += last_carry2;
+        }
+    }
+
+#elif defined(__AVX2__)
+    int i = 0;
+
+    // Phase 1: Local prefix sums
+    for (; i + 7 < n; i += 8) {
+        prefix_sum_vec_avx2(&temp1[i]);
+        prefix_sum_vec_avx2(&temp2[i]);
+    }
+
+    // Handle remaining with SSE
+    if (i + 3 < n) {
+        __m128i x1 = _mm_loadu_si128((__m128i *)&temp1[i]);
+        __m128i x2 = _mm_loadu_si128((__m128i *)&temp2[i]);
+        x1 = prefix_sum_vec_sse(x1);
+        x2 = prefix_sum_vec_sse(x2);
+        _mm_storeu_si128((__m128i *)&temp1[i], x1);
+        _mm_storeu_si128((__m128i *)&temp2[i], x2);
+        i += 4;
+    }
+
+    // Final remainder
+    for (int j = i; j < n; j++) {
+        if (j > 0) {
+            temp1[j] += temp1[j - 1];
+            temp2[j] += temp2[j - 1];
+        }
+    }
+
+    // Phase 2: Accumulate
+    __m128i carry1 = _mm_setzero_si128();
+    __m128i carry2 = _mm_setzero_si128();
+    for (int j = 4; j < n; j += 4) {
+        carry1 = accumulate_sse(&temp1[j], carry1);
+        carry2 = accumulate_sse(&temp2[j], carry2);
+    }
+
+#elif defined(__SSE2__)
+    int i = 0;
+
+    // Phase 1: Local prefix sums
+    for (; i + 3 < n; i += 4) {
+        __m128i x1 = _mm_loadu_si128((__m128i *)&temp1[i]);
+        __m128i x2 = _mm_loadu_si128((__m128i *)&temp2[i]);
+        x1 = prefix_sum_vec_sse(x1);
+        x2 = prefix_sum_vec_sse(x2);
+        _mm_storeu_si128((__m128i *)&temp1[i], x1);
+        _mm_storeu_si128((__m128i *)&temp2[i], x2);
+    }
+
+    // Remainder
+    for (int j = i; j < n; j++) {
+        if (j > 0) {
+            temp1[j] += temp1[j - 1];
+            temp2[j] += temp2[j - 1];
+        }
+    }
+
+    // Phase 2: Accumulate
+    if (n > 4) {
+        __m128i carry1 = _mm_setzero_si128();
+        __m128i carry2 = _mm_setzero_si128();
+        for (int j = 4; j < n; j += 4) {
+            carry1 = accumulate_sse(&temp1[j], carry1);
+            carry2 = accumulate_sse(&temp2[j], carry2);
+        }
+    }
+
+#else
+    // Scalar fallback
+    for (int i = 1; i < n; i++) {
+        temp1[i] += temp1[i - 1];
+        temp2[i] += temp2[i - 1];
+    }
+#endif
+
+    // Copy results to output arrays
+    for (int i = 0; i < n; i++) {
+        output1[i + 1] = temp1[i];
+        output2[i + 1] = temp2[i];
+    }
+}
 
 /**
  * @brief Optimized (dual) prefix sum using SIMD via
@@ -541,30 +708,32 @@ std::array<int, MAX_K * 2> rsr_inference_fused(const int8_t *v,
                                                const int k) {
     int roundup = CHUNK_SIZE + (k - CHUNK_SIZE % k) % k;
     int n = v_size;
+    int num_blocks = roundup / k;
 
-    assert((roundup / k) < MAX_BLKS); // warn to increase bound if needed
+    assert(num_blocks < MAX_BLKS); // warn to increase bound if needed
 
     static thread_local std::array<std::array<int, MAX_SEGS>, MAX_BLKS> us =
         std::array<std::array<int, MAX_SEGS>, MAX_BLKS>();
 
     const int seg_size = 1 << k;
-    std::array<int, MAX_PERM + 1> pref1{};
-    std::array<int, MAX_PERM + 1> pref2{};
     std::array<int, MAX_K * 2> result;
 
-    for (int i = 0; i < (roundup / k); i++) {
+    // Precompute all prefix sums in 2D arrays using stored inverse permutations
+    static thread_local std::array<std::array<int, MAX_PERM + 1>, MAX_BLKS> all_pref1;
+    static thread_local std::array<std::array<int, MAX_PERM + 1>, MAX_BLKS> all_pref2;
+
+    // Compute prefix sums using stored inverse permutations (no conversion needed)
+    for (int i = 0; i < num_blocks; i++) {
+        simd_dual_prefix_sum_inverse<MAX_PERM>(all_pref1[i], all_pref2[i], v, permutations1[i], permutations2[i], n);
+    }
+
+    for (int i = 0; i < num_blocks; i++) {
         std::array<float, MAX_K> partial_result{};
         const std::array<int, MAX_SEG_SIZE> &segment1 = segments1[i];
-        const std::array<int, MAX_PERM> &permutation1 = permutations1[i];
         const std::array<int, MAX_SEG_SIZE> &segment2 = segments2[i];
-        const std::array<int, MAX_PERM> &permutation2 = permutations2[i];
+        const std::array<int, MAX_PERM + 1> &pref1 = all_pref1[i];
+        const std::array<int, MAX_PERM + 1> &pref2 = all_pref2[i];
 
-        // Use SIMD dual prefix sum instead of naive loop
-        // Timer p("prefix");
-        simd_dual_prefix_sum<MAX_PERM>(pref1, pref2, v, permutation1, permutation2, n);
-        // p.stop();
-
-        // Timer s("Segsum");
         for (int j = 0; j < seg_size; j++) {
             int start1 = segment1[j];
             int start2 = segment2[j];
@@ -581,17 +750,12 @@ std::array<int, MAX_K * 2> rsr_inference_fused(const int8_t *v,
 
             us[i][j] = (pref1[end1] - pref1[start1]) - (pref2[end2] - pref2[start2]);
         }
-        // s.stop();
 
-        // Timer g("GEVM");
         partial_result = RSRGemv<MAX_SEGS, MAX_K>(us[i], bin_k);
-        // g.stop();
 
-        // Timer w("Write");
         for (int j = 0; j < k; j++) {
             result[i * k + j] = partial_result[j];
         }
-        // w.stop();
     }
 
     return result;
