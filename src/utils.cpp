@@ -131,18 +131,3 @@ vector<float> rsr_forward(const vector<vector<int8_t>> &seg_sums, const vector<a
 
     return result;
 }
-
-vector<array<int8_t, 16>> generateBinaryMatrix(int k) {
-    int rows = pow(2, k);                                      // 2^k rows
-    vector<array<int8_t, 16>> matrix(rows); // Initialize matrix
-
-    for (int i = 0; i < rows; ++i) {
-        matrix[i].fill(0); // Initialize with zeros
-        for (int j = 0; j < k; ++j) {
-            // Generate the binary value for each position
-            matrix[i][k - j - 1] = (i >> j) & 1; // Extract the j-th bit from i
-        }
-    }
-
-    return matrix;
-}

@@ -3,6 +3,7 @@
 
 #include <algorithm>
 #include <cassert>
+#include <cstdio>
 #ifdef __ARM_NEON__
 #include <arm_neon.h>
 #endif
@@ -232,6 +233,22 @@ inline void compute_inverse_perm(std::array<int, MAX_PERM> &inv_perm, const std:
     }
 }
 
+template <size_t MAX_K>
+std::vector<std::array<int8_t, MAX_K>> generateBinaryMatrix(int k) {
+    int rows = 1 << k;
+    std::vector<std::array<int8_t, MAX_K>> matrix(rows); // Initialize matrix
+
+    for (int i = 0; i < rows; ++i) {
+        matrix[i].fill(0); // Initialize with zeros
+        for (int j = 0; j < k; ++j) {
+            // Generate the binary value for each position
+            matrix[i][k - j - 1] = (i >> j) & 1; // Extract the j-th bit from i
+        }
+    }
+
+    return matrix;
+}
+
 /**
  * @brief Unpacks a block of 2-bit quantized data into a vector of ternary values.
  *
@@ -309,9 +326,9 @@ rsr_forward(const std::vector<std::vector<int8_t>> &seg_sums, const std::vector<
 
 template <size_t MAX_SEGS, size_t MAX_K>
 static std::array<float, MAX_K> RSRGemv(const std::array<int, MAX_SEGS> &vec,
-                                        const std::vector<std::array<int8_t, 16>> &mat) {
-    int mat_rows = mat.size();    // 256
-    int mat_cols = 16; // Fixed size from array
+                                        const std::vector<std::array<int8_t, MAX_K>> &mat) {
+    int mat_rows = mat.size(); // 256
+    int mat_cols = MAX_K;      // Fixed size from array
 
     // Initialize result array
     std::array<float, MAX_K> result{};
@@ -698,25 +715,27 @@ inline void simd_dual_prefix_sum(std::array<int, MAX_PERM + 1> &output1,
 }
 
 template <size_t MAX_SEGS, size_t MAX_BLKS, size_t MAX_PERM, size_t MAX_SEG_SIZE, size_t MAX_K, size_t CHUNK_SIZE>
-std::array<int, MAX_K * 2> rsr_inference_fused(const int8_t *v,
-                                               int v_size,
-                                               const std::vector<std::array<int, MAX_PERM>> &permutations1,
-                                               const std::vector<std::array<int, MAX_SEG_SIZE>> &segments1,
-                                               const std::vector<std::array<int, MAX_PERM>> &permutations2,
-                                               const std::vector<std::array<int, MAX_SEG_SIZE>> &segments2,
-                                               const std::vector<std::array<int8_t, 16>> &bin_k,
-                                               const int k) {
-    int roundup = CHUNK_SIZE + (k - CHUNK_SIZE % k) % k;
+std::array<int, CHUNK_SIZE * 2> rsr_inference_fused(const int8_t *v,
+                                                      int v_size,
+                                                      const std::vector<std::array<int, MAX_PERM>> &permutations1,
+                                                      const std::vector<std::array<int, MAX_SEG_SIZE>> &segments1,
+                                                      const std::vector<std::array<int, MAX_PERM>> &permutations2,
+                                                      const std::vector<std::array<int, MAX_SEG_SIZE>> &segments2,
+                                                      const std::vector<std::array<int8_t, MAX_K>> &bin_k,
+                                                      const int k,
+                                                      const int output_rows) {
+    int roundup = output_rows + (k - output_rows % k) % k;
     int n = v_size;
     int num_blocks = roundup / k;
 
+    assert(v_size <= (int)MAX_PERM);
     assert(num_blocks < MAX_BLKS); // warn to increase bound if needed
 
     static thread_local std::array<std::array<int, MAX_SEGS>, MAX_BLKS> us =
         std::array<std::array<int, MAX_SEGS>, MAX_BLKS>();
 
     const int seg_size = 1 << k;
-    std::array<int, MAX_K * 2> result;
+    std::array<int, CHUNK_SIZE * 2> result;
 
     // Precompute all prefix sums in 2D arrays using stored inverse permutations
     static thread_local std::array<std::array<int, MAX_PERM + 1>, MAX_BLKS> all_pref1;
@@ -765,8 +784,6 @@ std::vector<std::vector<int8_t>> seg_sum(const std::vector<int8_t> &v,
                                          const std::vector<std::vector<int8_t>> &perms,
                                          const std::vector<std::vector<int8_t>> &segs,
                                          int8_t k);
-
-std::vector<std::array<int8_t, 16>> generateBinaryMatrix(int k);
 
 /**
  * @brief Transposes a 2D matrix in-place.

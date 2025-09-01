@@ -33,10 +33,10 @@ using namespace std;
 template <typename T> using matrix = vector<vector<T>>;
 
 constexpr size_t MAX_SEG_SIZE = 1024;  // pow(2, k) max, typically k=8-10
-constexpr size_t MAX_BLOCKS = 4;       // permutations.size() max
+constexpr size_t MAX_BLOCKS = 32;       // permutations.size() max
 constexpr size_t MAX_PERM_SIZE = 8192; // permutation array size
 constexpr size_t MAX_K = 10;           // max k value for bin matrices
-constexpr size_t CHUNK_SIZE = 16;      // chunk size
+constexpr size_t CHUNK_SIZE = 128;      // chunk size
 
 struct RSRCacheEntry {
     vector<array<int, MAX_PERM_SIZE>> perm1, perm2;
@@ -70,7 +70,9 @@ void ggml_bitnet_rsr_mul_mat(const struct ggml_tensor *src0,
 
     // RSR
     const int K = static_cast<int>(ceil(log2(ne00) - log2(log2(ne00)))); // Usually 8
-    vector<array<int8_t, 16>> bin_k = generateBinaryMatrix(K);
+    assert(K <= (int)MAX_K);
+
+    vector<array<int8_t, MAX_K>> bin_k = generateBinaryMatrix<MAX_K>(K);
 
     // Get scales and sums
     const float *scale = (float *)((uint8_t *)(src0->data) + (ne00 * ne01 / 4));
@@ -119,7 +121,7 @@ void ggml_bitnet_rsr_mul_mat(const struct ggml_tensor *src0,
                 const int output_rows = std::min(blck_0, (int)(ir0_end - iir0));
                 assert(output_rows <= (int)CHUNK_SIZE);
 
-                float tmp[32];
+                float tmp[CHUNK_SIZE];
                 bool enable_cache = true; // FIX: Enable cache
 
                 if (src0->type == GGML_TYPE_I2_S) {
@@ -194,7 +196,7 @@ void ggml_bitnet_rsr_mul_mat(const struct ggml_tensor *src0,
                         }
                     }
 
-                    array<int, MAX_K * 2> fused_result =
+                    array<int, CHUNK_SIZE * 2> fused_result =
                         rsr_inference_fused<MAX_SEG_SIZE, MAX_BLOCKS, MAX_PERM_SIZE, MAX_SEG_SIZE, MAX_K, CHUNK_SIZE>(
                             src1_col_de,
                             ne00,
@@ -203,7 +205,8 @@ void ggml_bitnet_rsr_mul_mat(const struct ggml_tensor *src0,
                             cached_entry->perm2,
                             cached_entry->seg2,
                             bin_k,
-                            K);
+                            K,
+                            output_rows);
 
                     // vector<float> output = vectorMatrixMultiply(acts, weight_matrix);
 
