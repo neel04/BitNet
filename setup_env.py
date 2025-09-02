@@ -224,7 +224,8 @@ def compile():
             "build",
             *COMPILER_EXTRA_ARGS[arch],
             *OS_EXTRA_ARGS.get(platform.system(), []),
-            "-DCMAKE_BUILD_TYPE=Debug",
+            "-DCMAKE_BUILD_TYPE=Release",
+            "-DENABLE_ASAN=OFF",
             "-DCMAKE_C_COMPILER=clang",
             "-DCMAKE_CXX_COMPILER=clang++",
             f"-DCMAKE_CXX_FLAGS={llvm_fix_flags}",
@@ -235,7 +236,11 @@ def compile():
         log_step="generate_build_files",
     )
     # run_command(["cmake", "--build", "build", "--target", "llama-cli", "--config", "Release"])
-    run_command(["cmake", "--build", "build", "--config", "Release", "-j8"], log_step="compile")
+    run_command(
+        ["cmake", "--build", "build", "--config", "Release", f"-j{os.cpu_count()}"],
+        log_step="compile",
+    )
+
 
 def main():
     setup_gguf()
