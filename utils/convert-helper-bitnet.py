@@ -81,7 +81,7 @@ def main():
             str(model_dir),
             "--vocab-type", "bpe",
             "--outtype", "f32",
-            "--concurrency", "1",
+            "--concurrency", "2",
             "--outfile", str(gguf_f32_output)
         ]
         run_command(cmd_convert)
@@ -91,7 +91,7 @@ def main():
             str(llama_quantize_binary),
             str(gguf_f32_output),
             str(gguf_i2s_output),
-            "I2_S",
+            "f32",
             "1"
         ]
         run_command(cmd_quantize)

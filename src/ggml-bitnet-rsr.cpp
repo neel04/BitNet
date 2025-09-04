@@ -1,6 +1,5 @@
 #include "ggml-bitnet-rsr.h"
 #include <array>
-#include <iostream>
 
 #ifdef __ARM_NEON__
 #include <arm_neon.h>
@@ -32,14 +31,8 @@ using namespace std;
 
 template <typename T> using matrix = vector<vector<T>>;
 
-constexpr size_t MAX_SEG_SIZE = 1024;  // pow(2, k) max, typically k=8-10
-constexpr size_t MAX_BLOCKS = 32;       // permutations.size() max
-constexpr size_t MAX_PERM_SIZE = 8192; // permutation array size
-constexpr size_t MAX_K = 10;           // max k value for bin matrices
-constexpr size_t CHUNK_SIZE = 128;      // chunk size
-
 struct RSRCacheEntry {
-    vector<array<int, MAX_PERM_SIZE>> perm1, perm2;
+    vector<array<int, MAX_PERM>> perm1, perm2;
     vector<array<int, MAX_SEG_SIZE>> seg1, seg2;
 };
 
@@ -131,7 +124,7 @@ void ggml_bitnet_rsr_mul_mat(const struct ggml_tensor *src0,
                     vector<int8_t> cache_key = unpack_i2_s(first_packed_row, ne00 / 4);
 
                     bool cache_hit = false;
-                    const RSRCacheEntry* cached_entry = nullptr;
+                    const RSRCacheEntry *cached_entry = nullptr;
 
                     if (enable_cache) {
                         std::shared_lock<std::shared_mutex> read_lock(cache_mutex);
@@ -144,8 +137,8 @@ void ggml_bitnet_rsr_mul_mat(const struct ggml_tensor *src0,
                         }
                     }
 
-                    RSRCacheEntry local_cache_entry;  // Local entry for cache miss case
-                    
+                    RSRCacheEntry local_cache_entry; // Local entry for cache miss case
+
                     if (!cache_hit) {
                         // Cache miss - need to unpack weights and preprocess
                         matrix<uint8_t> weight_matrix_bin1(output_rows, vector<uint8_t>(ne00, 0));
@@ -176,10 +169,8 @@ void ggml_bitnet_rsr_mul_mat(const struct ggml_tensor *src0,
                             }
                         }
 
-                        auto preprocessed1 =
-                            preprocess<MAX_PERM_SIZE, MAX_SEG_SIZE, MAX_K, MAX_BLOCKS>(weight_matrix_bin1_T, K);
-                        auto preprocessed2 =
-                            preprocess<MAX_PERM_SIZE, MAX_SEG_SIZE, MAX_K, MAX_BLOCKS>(weight_matrix_bin2_T, K);
+                        auto preprocessed1 = preprocess(weight_matrix_bin1_T, K);
+                        auto preprocessed2 = preprocess(weight_matrix_bin2_T, K);
 
                         // Copy to local cache entry
                         local_cache_entry.perm1 = preprocessed1.a;
@@ -196,17 +187,15 @@ void ggml_bitnet_rsr_mul_mat(const struct ggml_tensor *src0,
                         }
                     }
 
-                    array<int, CHUNK_SIZE * 2> fused_result =
-                        rsr_inference_fused<MAX_SEG_SIZE, MAX_BLOCKS, MAX_PERM_SIZE, MAX_SEG_SIZE, MAX_K, CHUNK_SIZE>(
-                            src1_col_de,
-                            ne00,
-                            cached_entry->perm1,
-                            cached_entry->seg1,
-                            cached_entry->perm2,
-                            cached_entry->seg2,
-                            bin_k,
-                            K,
-                            output_rows);
+                    array<int, CHUNK_SIZE * 2> fused_result = rsr_inference_fused(src1_col_de,
+                                                                                  ne00,
+                                                                                  cached_entry->perm1,
+                                                                                  cached_entry->seg1,
+                                                                                  cached_entry->perm2,
+                                                                                  cached_entry->seg2,
+                                                                                  bin_k,
+                                                                                  K,
+                                                                                  output_rows);
 
                     // vector<float> output = vectorMatrixMultiply(acts, weight_matrix);
 

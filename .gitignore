@@ -54,3 +54,5 @@ CMakeCache.txt
 LlamaConfigVersion.cmake
 build.ninja
 cmake_install.cmake
+*microbenchmarks*
+microbenchmarks*
