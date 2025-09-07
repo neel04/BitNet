@@ -1,3 +1,4 @@
+#include <stdexcept>
 #ifdef __ARM_NEON__
 #include <arm_neon.h>
 #endif
@@ -22,6 +23,36 @@
 using namespace std;
 
 template <typename T> using matrix = vector<vector<T>>;
+
+// OPTIMIZE/FIX: We need to skip if `count == 0`
+struct LUT {
+    uint8_t indices[256][8];
+    uint8_t counts[256];
+
+    constexpr LUT() : indices{}, counts{} {
+        for (int m = 0; m < 256; ++m) {
+            int cnt = 0;
+            for (int b = 0; b < 8; ++b) {
+                if (m & (1u << b))
+                    indices[m][cnt++] = (uint8_t)b;
+            }
+            // pad remaining bytes (not necessary but deterministic)
+            for (int k = cnt; k < 8; ++k)
+                indices[m][k] = 0xFF;
+            counts[m] = (uint8_t)cnt;
+        }
+    }
+};
+
+static constexpr LUT lut = LUT();
+static constexpr auto &lut_indices = lut.indices;
+static constexpr auto &lut_counts = lut.counts;
+
+static inline int32x4_t reduce_i8x16_to_i32x4_simd(int8x16_t v) {
+    int16x8_t p16 = vpaddlq_s8(v);
+    int32x4_t sums4 = vpaddlq_s16(p16);
+    return sums4;
+}
 
 /**
  * @brief Computes the dot product of `nrc` rows from a 2-bit quantized matrix `vx` and an 8-bit quantized matrix `vy`.
@@ -136,10 +167,11 @@ static void bitnet_vec_dot(int n, float *s, size_t bs, const void *vx, size_t bx
 
 #elif defined(__ARM_NEON)
     // Initialize four 128-bit registers to accumulate results in parallel.
-    int32x4_t accu_0 = vdupq_n_s32(0);
-    int32x4_t accu_1 = vdupq_n_s32(0);
-    int32x4_t accu_2 = vdupq_n_s32(0);
-    int32x4_t accu_3 = vdupq_n_s32(0);
+    int32x4_t masked_accum_0 = vdupq_n_s32(0);
+    int32x4_t masked_accum_1 = vdupq_n_s32(0);
+    int32x4_t masked_accum_2 = vdupq_n_s32(0);
+    int32x4_t masked_accum_3 = vdupq_n_s32(0);
+
     const uint8x16_t mask = vdupq_n_u8(3); // Mask for isolating 2-bit values (0b00000011).
 
     // Process major blocks of the matrix.
@@ -190,15 +222,22 @@ static void bitnet_vec_dot(int n, float *s, size_t bs, const void *vx, size_t bx
             const int8x16_t yq8_7 = vld1q_s8(y + i * 128 * 32 + j * 128 + 112);
 
 #if defined(__ARM_FEATURE_DOTPROD)
-            // Perform dot product and accumulate using dedicated hardware instructions.
-            accu_0 = vdotq_s32(accu_0, q8_0, yq8_0);
-            accu_1 = vdotq_s32(accu_1, q8_1, yq8_1);
-            accu_2 = vdotq_s32(accu_2, q8_2, yq8_2);
-            accu_3 = vdotq_s32(accu_3, q8_3, yq8_3);
-            accu_0 = vdotq_s32(accu_0, q8_4, yq8_4);
-            accu_1 = vdotq_s32(accu_1, q8_5, yq8_5);
-            accu_2 = vdotq_s32(accu_2, q8_6, yq8_6);
-            accu_3 = vdotq_s32(accu_3, q8_7, yq8_7);
+            masked_accum_0 =
+                vaddq_s32(masked_accum_0, reduce_i8x16_to_i32x4_simd(vandq_s8(vceqq_s8(q8_0, vdupq_n_s8(1)), yq8_0)));
+            masked_accum_1 =
+                vaddq_s32(masked_accum_1, reduce_i8x16_to_i32x4_simd(vandq_s8(vceqq_s8(q8_1, vdupq_n_s8(1)), yq8_1)));
+            masked_accum_2 =
+                vaddq_s32(masked_accum_2, reduce_i8x16_to_i32x4_simd(vandq_s8(vceqq_s8(q8_2, vdupq_n_s8(1)), yq8_2)));
+            masked_accum_3 =
+                vaddq_s32(masked_accum_3, reduce_i8x16_to_i32x4_simd(vandq_s8(vceqq_s8(q8_3, vdupq_n_s8(1)), yq8_3)));
+            masked_accum_0 =
+                vaddq_s32(masked_accum_0, reduce_i8x16_to_i32x4_simd(vandq_s8(vceqq_s8(q8_4, vdupq_n_s8(1)), yq8_4)));
+            masked_accum_1 =
+                vaddq_s32(masked_accum_1, reduce_i8x16_to_i32x4_simd(vandq_s8(vceqq_s8(q8_5, vdupq_n_s8(1)), yq8_5)));
+            masked_accum_2 =
+                vaddq_s32(masked_accum_2, reduce_i8x16_to_i32x4_simd(vandq_s8(vceqq_s8(q8_6, vdupq_n_s8(1)), yq8_6)));
+            masked_accum_3 =
+                vaddq_s32(masked_accum_3, reduce_i8x16_to_i32x4_simd(vandq_s8(vceqq_s8(q8_7, vdupq_n_s8(1)), yq8_7)));
 #else
             // Fallback for older ARMv8: multiply and accumulate long, widening to 16-bit.
             accu32_0 = vmlal_s8(accu32_0, vget_low_s8(q8_0), vget_low_s8(yq8_0));
@@ -273,14 +312,22 @@ static void bitnet_vec_dot(int n, float *s, size_t bs, const void *vx, size_t bx
             const int8x16_t yq8_7 = vld1q_s8(y + group32_num * 128 * 32 + j * 128 + 112);
 
 #if defined(__ARM_FEATURE_DOTPROD)
-            accu_0 = vdotq_s32(accu_0, q8_0, yq8_0);
-            accu_1 = vdotq_s32(accu_1, q8_1, yq8_1);
-            accu_2 = vdotq_s32(accu_2, q8_2, yq8_2);
-            accu_3 = vdotq_s32(accu_3, q8_3, yq8_3);
-            accu_0 = vdotq_s32(accu_0, q8_4, yq8_4);
-            accu_1 = vdotq_s32(accu_1, q8_5, yq8_5);
-            accu_2 = vdotq_s32(accu_2, q8_6, yq8_6);
-            accu_3 = vdotq_s32(accu_3, q8_7, yq8_7);
+            masked_accum_0 =
+                vaddq_s32(masked_accum_0, reduce_i8x16_to_i32x4_simd(vandq_s8(vceqq_s8(q8_0, vdupq_n_s8(1)), yq8_0)));
+            masked_accum_1 =
+                vaddq_s32(masked_accum_1, reduce_i8x16_to_i32x4_simd(vandq_s8(vceqq_s8(q8_1, vdupq_n_s8(1)), yq8_1)));
+            masked_accum_2 =
+                vaddq_s32(masked_accum_2, reduce_i8x16_to_i32x4_simd(vandq_s8(vceqq_s8(q8_2, vdupq_n_s8(1)), yq8_2)));
+            masked_accum_3 =
+                vaddq_s32(masked_accum_3, reduce_i8x16_to_i32x4_simd(vandq_s8(vceqq_s8(q8_3, vdupq_n_s8(1)), yq8_3)));
+            masked_accum_0 =
+                vaddq_s32(masked_accum_0, reduce_i8x16_to_i32x4_simd(vandq_s8(vceqq_s8(q8_4, vdupq_n_s8(1)), yq8_4)));
+            masked_accum_1 =
+                vaddq_s32(masked_accum_1, reduce_i8x16_to_i32x4_simd(vandq_s8(vceqq_s8(q8_5, vdupq_n_s8(1)), yq8_5)));
+            masked_accum_2 =
+                vaddq_s32(masked_accum_2, reduce_i8x16_to_i32x4_simd(vandq_s8(vceqq_s8(q8_6, vdupq_n_s8(1)), yq8_6)));
+            masked_accum_3 =
+                vaddq_s32(masked_accum_3, reduce_i8x16_to_i32x4_simd(vandq_s8(vceqq_s8(q8_7, vdupq_n_s8(1)), yq8_7)));
 #else
             accula_0 = vmlal_s8(accula_0, vget_low_s8(q8_0), vget_low_s8(yq8_0));
             accula_1 = vmlal_s8(accula_1, vget_high_s8(q8_0), vget_high_s8(yq8_0));
@@ -314,11 +361,11 @@ static void bitnet_vec_dot(int n, float *s, size_t bs, const void *vx, size_t bx
 #endif
     }
     // Horizontally add the final accumulator vectors to get the single dot product result.
-    accu_0 = vaddq_s32(accu_0, accu_1);
-    accu_2 = vaddq_s32(accu_2, accu_3); // compliler parallelizes
-    accu_0 = vaddq_s32(accu_0, accu_2);
-    int sumi = vaddlvq_s32(accu_0);
-    *s = (float)sumi;
+    masked_accum_0 = vaddq_s32(masked_accum_0, masked_accum_1);
+    masked_accum_2 = vaddq_s32(masked_accum_2, masked_accum_3);
+    masked_accum_0 = vaddq_s32(masked_accum_0, masked_accum_2);
+    int masked_accumi = vaddlvq_s32(masked_accum_0);
+    *s = (float)masked_accumi;
 
 #endif
 }
